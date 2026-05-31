@@ -1,0 +1,6 @@
+{
+  "name": "Heli-Strike 3D",
+  "description": "High-performance 3D helicopter combat game prototype using Three.js and Cannon-es.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
