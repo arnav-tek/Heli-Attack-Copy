@@ -1267,6 +1267,7 @@ class Helicopter extends Entity {
   lastTargetPosition: THREE.Vector3;
   mainRotor: THREE.Object3D;
   tailRotor: THREE.Object3D;
+  shieldMesh: THREE.Mesh | null = null;
 
   // Subsystems
   rotorHealth: number = 100;
@@ -2156,10 +2157,12 @@ class Enemy extends Entity {
     const dirX = dx / dist;
     const dirZ = dz / dist;
 
-    // DRONE: Chase player with movement
+    // DRONE: Chase player with swooping movement
     if (this.type === EnemyType.DRONE) {
       const speed = 35;
-      this.body.velocity.set(dirX * speed, 0, dirZ * speed);
+      const swoopX = Math.cos(time * 2 + this.personalityOffset) * 15;
+      const swoopZ = Math.sin(time * 2 + this.personalityOffset) * 15;
+      this.body.velocity.set(dirX * speed + swoopX, 0, dirZ * speed + swoopZ);
 
       // Drones fire rapidly at close range
       let fired = false;
@@ -2193,11 +2196,30 @@ class Enemy extends Entity {
     else if (this.type === EnemyType.SHOOTER) speed = 20;
     else if (this.type === EnemyType.BOSS) speed = 10;
     else if (this.type === EnemyType.BASIC) speed = 18;
-    
-    if (dist > 35) {
+
+    // AI Evasive and Flanking logic
+    if (time - this.lastDecisionTime > 2.0 + Math.random() * 2.0) {
+      this.lastDecisionTime = time;
+      if (Math.random() > 0.5) this.flankDir *= -1;
+      
+      if (Math.random() > 0.7) {
+        this.evadeTimer = time + 0.5 + Math.random() * 1.0;
+      }
+    }
+
+    const isEvading = time < this.evadeTimer;
+    const tangentX = -dirZ * this.flankDir;
+    const tangentZ = dirX * this.flankDir;
+
+    if (dist > 45) {
+      // Approach directly
       this.body.velocity.set(dirX * speed, 0, dirZ * speed);
+    } else if (dist < 20 || isEvading) {
+      // Evade / back away and strafe
+      this.body.velocity.set((-dirX + tangentX * 1.5) * speed * 0.7, 0, (-dirZ + tangentZ * 1.5) * speed * 0.7);
     } else {
-      this.body.velocity.set(0, 0, 0);
+      // Orbit (strafe)
+      this.body.velocity.set((tangentX + dirX * 0.2) * speed * 0.6, 0, (tangentZ + dirZ * 0.2) * speed * 0.6);
     }
 
     // Firing Logic
@@ -2754,6 +2776,15 @@ export class GameEngine {
   shieldTimer: number = 0;
   speedBoostTimer: number = 0;
 
+  // Time dilation & Hit-Stop
+  timeScale: number = 1.0;
+  hitStopTimer: number = 0;
+
+  triggerHitStop(duration: number, scale: number = 0.05) {
+    this.hitStopTimer = duration;
+    this.timeScale = scale;
+  }
+
   // Dash variables
   dashCooldownTimer: number = 0;
   dashActiveTimer: number = 0;
@@ -2867,6 +2898,7 @@ export class GameEngine {
       }
       this.cameraShake = Math.max(this.cameraShake, 3.5);
       this.score += Math.floor(50 * this.comboMultiplier);
+      this.triggerHitStop(0.12, 0.04); // Crunchy freeze on building collapse
     };
 
     this.helicopter = new Helicopter(this.scene, this.world);
@@ -3626,7 +3658,7 @@ export class GameEngine {
     const noseOffset = this.currentWeapon === WeaponType.SHOTGUN ? 3.1 : 2.55;
     const podSpacing =
       this.currentWeapon === WeaponType.MACHINE_GUN
-        ? 2.55
+        ? 0.0
         : this.currentWeapon === WeaponType.SHOTGUN
           ? 0.42
           : 3.0;
@@ -4114,6 +4146,10 @@ export class GameEngine {
     this.enemies.push(
       new Enemy(this.scene, this.world, spot.x, spot.z, type, spot.y),
     );
+    
+    // Spawn teleportation/arrival effect so enemies don't just pop in jarringly
+    this.particles.spawnExplosion(spot.x, spot.y, spot.z, 30, performance.now() / 1000, 15);
+    
     this.enemiesSpawnedInWave++;
     this.playSpawnCue(performance.now() / 1000);
   }
@@ -4137,7 +4173,7 @@ export class GameEngine {
     const height = this.city.getHeightAt(baseX, z, type === EnemyType.DRONE ? 0 : 3);
     const rooftopFallback =
       height > 2
-        ? { x: baseX, y: height + 2.2, z }
+        ? { x: baseX, y: height + 4.5, z }
         : this.city.getAmbushSpot(player, 55, 205);
 
     if (type === EnemyType.DRONE) {
@@ -4220,6 +4256,7 @@ export class GameEngine {
       }
     } else if (this.enemies.length === 0) {
       // Wave cleared! Go to next wave
+      this.triggerHitStop(0.42, 0.03); // Dramatic freeze on wave clear!
       this.startNextWave();
     }
 
@@ -4495,8 +4532,18 @@ export class GameEngine {
     this.animationFrame = requestAnimationFrame(this.tick);
 
     const time = performance.now() / 1000;
-    const delta = Math.min(time - this.lastTime, 0.1);
+    const realDelta = Math.min(time - this.lastTime, 0.1);
     this.lastTime = time;
+
+    // Process Hit-Stop timer using real unscaled time
+    if (this.hitStopTimer > 0) {
+      this.hitStopTimer -= realDelta;
+      if (this.hitStopTimer <= 0) {
+        this.timeScale = 1.0;
+      }
+    }
+
+    const delta = realDelta * this.timeScale;
 
     if (!this.isPlaying) {
       this.innerRing.rotation.z += 0.025;
@@ -4831,23 +4878,32 @@ export class GameEngine {
         this.score += Math.floor(enemy.basePoints * this.comboMultiplier);
         this.updateUI(time);
 
+        // Trigger Hit-Stop for enemy kills to give a crunchy impact feel
+        const stopDuration = enemy.type === EnemyType.BOSS ? 0.32 : enemy.type === EnemyType.TANK ? 0.12 : 0.06;
+        const stopScale = enemy.type === EnemyType.BOSS ? 0.02 : 0.05;
+        this.triggerHitStop(stopDuration, stopScale);
+
         // Drop power-up chance (increased for arcade shoot-em-up intensity)
         const dropChance = enemy.type === EnemyType.TANK ? 0.65 : enemy.type === EnemyType.BOSS ? 1.0 : 0.35;
         if (Math.random() < dropChance) {
           this.dropPowerUp(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z);
         }
 
+        // Bigger explosion for enemies based on type
+        const explosionSize = enemy.type === EnemyType.BOSS ? 200 : enemy.type === EnemyType.TANK ? 120 : 80;
+        const volumetricScale = enemy.type === EnemyType.BOSS ? 30 : enemy.type === EnemyType.TANK ? 18 : 12;
+        
         this.particles.spawnExplosion(
           enemy.body.position.x,
           enemy.body.position.y,
           enemy.body.position.z,
-          80,
+          explosionSize,
           time,
-          30,
+          explosionSize * 0.4,
         );
-        this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, 12, 6.0);
-        this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, 22, 95);
-        this.audio.playExplosion(1.0);
+        this.volumetricExplosions.spawn(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z, volumetricScale, volumetricScale * 0.6);
+        this.city.damageNearby(enemy.body.position.x, enemy.body.position.z, enemy.type === EnemyType.BOSS ? 40 : 22, 95);
+        this.audio.playExplosion(enemy.type === EnemyType.BOSS ? 2.5 : 1.5);
       }
     });
 
