@@ -216,6 +216,7 @@ class CityEnvironment {
   halfWidthCells = 5;
   activeBehind = 1;
   activeAhead = 2;
+  onBuildingDestroyed: ((x: number, y: number, z: number) => void) | null = null;
 
   constructor(scene: THREE.Scene, world: CANNON.World) {
     this.group.name = "ModularBlockCity";
@@ -264,28 +265,7 @@ class CityEnvironment {
       }
     }
 
-    // Crumbling building animations
-    for (const block of this.blocks) {
-      if (block.destroyed && block.collapseProgress !== undefined && block.collapseProgress < 1.0) {
-        block.collapseProgress = Math.min(1.0, block.collapseProgress + delta * 2.0); // collapses over 0.5s
-        
-        block.meshes.forEach((mesh, idx) => {
-          const t = block.collapseProgress!;
-          const ease = t * t * (3 - 2 * t);
-          
-          const initialY = block.initialHeights ? block.initialHeights[idx] : mesh.position.y;
-          const targetY = Math.max(0.35, initialY * 0.18);
-          mesh.position.y = THREE.MathUtils.lerp(initialY, targetY, ease);
-          
-          mesh.scale.y = THREE.MathUtils.lerp(1.0, 0.18, ease);
-          
-          // Crumble shaking offset
-          const shakeFactor = (1.0 - ease) * 0.45;
-          mesh.position.x = block.x + (Math.random() - 0.5) * shakeFactor;
-          mesh.position.z = block.z + (Math.random() - 0.5) * shakeFactor;
-        });
-      }
-    }
+    // Crumbling building animations removed in favor of instant arcade destruction
 
     if (cacheDirty) this.rebuildCaches();
   }
@@ -310,7 +290,8 @@ class CityEnvironment {
 
     for (const block of this.blocks) {
       if (block.destroyed) continue;
-      if (Math.max(from.y, to.y) < -1 || Math.min(from.y, to.y) > block.height + 2.5) {
+      // Arcade style: Projectiles hit any building in their path, regardless of height
+      if (Math.max(from.y, to.y) < -1) {
         continue;
       }
       const t = this.segmentIntersectsBlockFootprint(from, to, block, 1.1);
@@ -370,9 +351,9 @@ class CityEnvironment {
     for (let gx = -this.halfWidthCells; gx <= this.halfWidthCells; gx++) {
       for (let local = -2; local <= 3; local++) {
         const isFlightLane = Math.abs(gx) <= 1;
-        if (isFlightLane && (id === 0 || this.hash(id, gx * 53 + local * 19) < 0.88)) continue;
+        if (isFlightLane && (id === 0 || this.hash(id, gx * 53 + local * 19) < 0.25)) continue;
         const roll = this.hash(id, gx * 13 + local * 37);
-        const density = zone === "desert" ? 0.32 : zone === "forest" ? 0.4 : 0.5;
+        const density = zone === "city" ? 0.28 : 0.20;
         if (roll > density) continue;
 
         const x = gx * this.cellSize + (this.hash(id, gx + local) - 0.5) * 4;
@@ -407,17 +388,10 @@ class CityEnvironment {
     };
     const colors = palettes[zone];
     const color = colors[Math.floor(seed * colors.length)];
-    const skyscraper = zone === "city" && Math.abs(gx) > 3 && seed > 0.72;
-    const height =
-      zone === "desert"
-        ? 5 + seed * 13
-        : zone === "forest"
-          ? 6 + seed * 16
-          : skyscraper
-            ? 34 + seed * 34
-            : 9 + seed * 30;
-    const width = zone === "base" ? 14 + seed * 10 : 8 + this.hash(chunk.id, gx) * 9;
-    const depth = zone === "refinery" ? 7 + this.hash(chunk.id, local) * 16 : 8 + this.hash(chunk.id, gx + 4) * 9;
+    const skyscraper = (zone === "city" || zone === "ruins") && Math.abs(gx) > 1 && seed > 0.72;
+    const height = skyscraper ? 22 + seed * 32 : 9 + seed * 14;
+    const width = zone === "base" ? 9 + seed * 5 : 6 + this.hash(chunk.id, gx) * 8;
+    const depth = zone === "refinery" ? 5 + this.hash(chunk.id, local) * 8 : 6 + this.hash(chunk.id, gx + 4) * 8;
 
     const building = createBox(width, height, depth, color);
     building.position.set(x, height / 2, z);
@@ -448,7 +422,7 @@ class CityEnvironment {
       z,
       true,
     );
-    const maxHp = 80 + height * 4;
+    const maxHp = 45 + height * 2.0;
     chunk.bodies.push(body);
     chunk.blocks.push({
       x,
@@ -592,9 +566,7 @@ class CityEnvironment {
     roadX: number,
     id: number,
   ) {
-    const lane = createBox(44, 0.05, this.chunkDepth - 0.6, zone === "city" ? 0x5ac7d4 : 0x40576a);
-    lane.position.set(0, -0.04, chunkCenterZ);
-    chunk.group.add(lane);
+    // No central lane box: removing it stops the play area from looking like the player is flying down the middle of a highway/runway.
 
     const shoulderColor = zone === "desert" ? 0xb99643 : zone === "forest" ? 0x2f744e : 0x38495d;
     for (const side of [-1, 1]) {
@@ -713,7 +685,7 @@ class CityEnvironment {
   }
 
   private zoneForChunk(id: number) {
-    const zones = ["city", "base", "refinery", "desert", "forest", "ruins"];
+    const zones = ["city", "city", "ruins", "refinery", "city", "city"];
     return zones[Math.abs(Math.floor(this.hash(id, 17) * zones.length)) % zones.length];
   }
 
@@ -765,8 +737,6 @@ class CityEnvironment {
 
     if (block.hp > 0 || block.destroyed) return;
     block.destroyed = true;
-    block.collapseProgress = 0;
-    block.initialHeights = block.meshes.map((m) => m.position.y);
 
     if (this.particles) {
       this.particles.spawnExplosion(
@@ -778,16 +748,17 @@ class CityEnvironment {
         block.width * 1.5, // large size scale
       );
     }
+    
+    if (this.onBuildingDestroyed) {
+      this.onBuildingDestroyed(block.x, block.height * 0.5, block.z);
+    }
 
     if (block.body) {
       block.body.collisionFilterMask = 0;
       block.body.collisionResponse = false;
     }
     for (const mesh of block.meshes) {
-      const mat = mesh.material;
-      if (mat instanceof THREE.MeshLambertMaterial) {
-        mat.color.setHex(0x26242a);
-      }
+      mesh.visible = false;
     }
   }
 
@@ -1287,6 +1258,10 @@ class Entity {
   }
 }
 
+const tempColor = new THREE.Color();
+const tempVec3_1 = new CANNON.Vec3();
+const tempVec3_2 = new CANNON.Vec3();
+
 class Helicopter extends Entity {
   targetPosition: THREE.Vector3;
   lastTargetPosition: THREE.Vector3;
@@ -1299,6 +1274,18 @@ class Helicopter extends Entity {
   hoverFloor: number = 0;
   smoothedHoverFloor: number = 0;
   aimPosition: THREE.Vector3 = new THREE.Vector3(0, 26, -30);
+
+  // Dash variables
+  dashTimer: number = 0;
+  dashDuration: number = 0.28;
+  dashRollDirection: number = 0;
+  dashPitchDirection: number = 0;
+
+  triggerDash(dx: number, dz: number) {
+    this.dashTimer = this.dashDuration;
+    this.dashRollDirection = dx;
+    this.dashPitchDirection = -dz; // Negative Z is forward
+  }
 
   constructor(scene: THREE.Scene, world: CANNON.World) {
     super(scene, world);
@@ -1575,6 +1562,54 @@ class Helicopter extends Entity {
   ) {
     if (!this.active) return;
 
+    if (this.dashTimer > 0) {
+      this.dashTimer -= delta;
+
+      // Visual rotation during dash
+      const progress = 1.0 - (this.dashTimer / this.dashDuration);
+      if (this.dashRollDirection !== 0) {
+        // Sideways barrel roll!
+        const rollAngle = progress * Math.PI * 2 * -this.dashRollDirection;
+        this.mesh.rotation.z = rollAngle;
+        this.mesh.rotation.x = Math.sin(progress * Math.PI) * -0.22; // slight dip forward
+      } else if (this.dashPitchDirection !== 0) {
+        // Forward/backward stunt flip!
+        const pitchAngle = progress * Math.PI * 2 * this.dashPitchDirection;
+        this.mesh.rotation.x = pitchAngle;
+        this.mesh.rotation.z = 0;
+      }
+
+      this.mesh.position.copy(this.body.position as any);
+
+      // Spawn spiraling particles during barrel roll or flip
+      if (particles && Math.random() < 0.45) {
+        const leftTip = new THREE.Vector3(-1.9, 0.4, 0.2).applyMatrix4(this.mesh.matrixWorld);
+        const rightTip = new THREE.Vector3(1.9, 0.4, 0.2).applyMatrix4(this.mesh.matrixWorld);
+        particles.spawnSmoke(leftTip.x, leftTip.y, leftTip.z, time);
+        particles.spawnSmoke(rightTip.x, rightTip.y, rightTip.z, time);
+        if (Math.random() < 0.2) {
+          particles.spawnSparks(leftTip.x, leftTip.y, leftTip.z, time);
+          particles.spawnSparks(rightTip.x, rightTip.y, rightTip.z, time);
+        }
+      }
+
+      // Still apply gravity compensation and vertical target tracking so we don't fall/rise wildly
+      this.smoothedHoverFloor +=
+        (this.hoverFloor - this.smoothedHoverFloor) *
+        Math.min(1, delta * (this.hoverFloor > this.smoothedHoverFloor ? 6.5 : 2.5));
+      const hoverBob = Math.sin(time * 1.7) * 0.14;
+      const targetY = Math.max(this.targetPosition.y, this.smoothedHoverFloor + 7.5) + hoverBob;
+      const ey = targetY - this.body.position.y;
+      const gravityComp = 9.82 * this.body.mass;
+      const fy = ey * 112 - this.body.velocity.y * 38 + gravityComp;
+
+      tempVec3_2.set(0, fy, 0);
+      this.body.applyForce(tempVec3_2, this.body.position);
+
+      this.animateRotors(80, 60, delta);
+      return;
+    }
+
     // Subsystem Penalties
     const engineEff = 0.5 + (this.engineHealth / 100) * 0.5; // Up to 50% thrust loss
     const rotorEff = 0.4 + (this.rotorHealth / 100) * 0.6; // Up to 60% agility loss
@@ -1591,9 +1626,10 @@ class Helicopter extends Entity {
           | THREE.Color
           | undefined;
         if (baseColor) {
+          tempColor.setHex(0x4d171a);
           child.material.color
             .copy(baseColor)
-            .lerp(new THREE.Color(0x4d171a), hullDamage * 0.75);
+            .lerp(tempColor, hullDamage * 0.75);
         }
       }
     });
@@ -1632,16 +1668,18 @@ class Helicopter extends Entity {
     const ez = this.targetPosition.z - this.body.position.z;
     const distToTarget = Math.sqrt(ex * ex + ez * ez);
 
-    const maxCruiseSpeed = (50 + inputAgility * 22) * engineEff;
-    let desiredVx = THREE.MathUtils.clamp(ex * 5.2, -maxCruiseSpeed, maxCruiseSpeed);
-    let desiredVz = THREE.MathUtils.clamp(ez * 5.2, -maxCruiseSpeed, maxCruiseSpeed);
+    const maxCruiseSpeed = (45 + inputAgility * 15) * engineEff;
+    // Arcade style: very aggressive position tracking (high factor ensures we track the target closely)
+    let desiredVx = THREE.MathUtils.clamp(ex * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
+    let desiredVz = THREE.MathUtils.clamp(ez * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
     const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
     if (desiredSpeed > maxCruiseSpeed) {
       desiredVx = (desiredVx / desiredSpeed) * maxCruiseSpeed;
       desiredVz = (desiredVz / desiredSpeed) * maxCruiseSpeed;
     }
 
-    const accelResponsiveness = (25 + inputAgility * 15) * rotorEff * engineEff;
+    // Arcade style: high acceleration responsiveness (snappy start/stop) but tuned to show off braking tilt
+    const accelResponsiveness = (75 + inputAgility * 25) * rotorEff * engineEff;
     let fx = (desiredVx - this.body.velocity.x) * this.body.mass * accelResponsiveness;
     let fz = (desiredVz - this.body.velocity.z) * this.body.mass * accelResponsiveness;
 
@@ -1665,14 +1703,16 @@ class Helicopter extends Entity {
     fx += driftX * idleFactor * 9;
     fz += driftZ * idleFactor * 9;
 
-    const maxForce = (610 + inputAgility * 260) * engineEff;
+    // Arcade style: allow sufficient force to achieve the desired velocity instantly
+    const maxForce = (2500 + inputAgility * 500) * engineEff;
     const forceMag = Math.sqrt(fx * fx + fz * fz);
     if (forceMag > maxForce) {
       fx = (fx / forceMag) * maxForce;
       fz = (fz / forceMag) * maxForce;
     }
 
-    this.body.applyForce(new CANNON.Vec3(fx, 0, fz), this.body.position);
+    tempVec3_1.set(fx, 0, fz);
+    this.body.applyForce(tempVec3_1, this.body.position);
 
     this.smoothedHoverFloor +=
       (this.hoverFloor - this.smoothedHoverFloor) *
@@ -1685,7 +1725,8 @@ class Helicopter extends Entity {
     const gravityComp = 9.82 * this.body.mass;
     const fy = ey * 112 - this.body.velocity.y * 38 + gravityComp;
 
-    this.body.applyForce(new CANNON.Vec3(0, fy, 0), this.body.position);
+    tempVec3_2.set(0, fy, 0);
+    this.body.applyForce(tempVec3_2, this.body.position);
 
     // Heading targeting (mouse aim has priority over movement direction)
     let targetAngle = this.mesh.rotation.y;
@@ -1715,17 +1756,22 @@ class Helicopter extends Entity {
     const localVz = this.body.velocity.x * sy + this.body.velocity.z * cy;
 
     // Auto-Stabilization: Suppress tilt if idling to gently correct rotation
-    const tiltMultiplier = isIdle ? 0.25 : 1.2;
+    const tiltMultiplier = isIdle ? 0.22 : 1.25;
 
-    // Visual Tilting: Pitch DOWN when moving forward (Positive localVz), Roll INTO turn
-    const tiltCap = 0.45 + inputAgility * 0.15;
+    // Transform applied forces to local space to tilt/roll based on thrust/acceleration
+    const localFx = fx * cy - fz * sy;
+    const localFz = fx * sy + fz * cy;
+
+    // Visual Tilting: Pitch DOWN when accelerating forward (positive localVz/negative localFz)
+    // and pitch UP (flare) when braking. Roll INTO turns based on lateral forces.
+    const tiltCap = 0.52;
     const targetTiltX =
-      THREE.MathUtils.clamp(localVz * 0.045, -tiltCap, tiltCap) * tiltMultiplier;
+      THREE.MathUtils.clamp(localFz * 0.00028 + localVz * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
     const targetTiltZ =
-      -THREE.MathUtils.clamp(localVx * 0.045, -tiltCap, tiltCap) * tiltMultiplier;
+      -THREE.MathUtils.clamp(localFx * 0.00028 + localVx * 0.0035, -tiltCap, tiltCap) * tiltMultiplier;
 
     const tiltSmoothing =
-      (isIdle ? 0.055 : 0.15 + inputAgility * 0.08) * rotorEff;
+      (isIdle ? 0.055 : 0.16 + inputAgility * 0.08) * rotorEff;
     this.mesh.rotation.x +=
       (targetTiltX - this.mesh.rotation.x) * tiltSmoothing;
     this.mesh.rotation.z +=
@@ -1735,28 +1781,9 @@ class Helicopter extends Entity {
     const rotorJitter = this.rotorHealth < 30 ? Math.sin(time * 60) * 0.05 : 0;
     this.mainRotor.position.y = 2.1 + rotorJitter; // Adjusted for Apache mast height
 
-    this.updatePhysics(this.body.velocity, targetTiltZ, delta);
     this.animateRotors(inputSpeed, 60, delta);
   }
   rotorSpeed: number = 0;
-
-  updatePhysics(velocity: CANNON.Vec3, bankingAngle: number, delta: number) {
-    if (this.active && this.mesh && this.body) {
-      this.mesh.position.copy(this.body.position as any);
-      
-      // Banking animation
-      this.mesh.rotation.z = THREE.MathUtils.lerp(
-        this.mesh.rotation.z,
-        bankingAngle * -0.35,
-        delta * 5.0
-      );
-      this.mesh.rotation.x = THREE.MathUtils.lerp(
-        this.mesh.rotation.x,
-        velocity.z * 0.02,
-        delta * 5.0
-      );
-    }
-  }
 
   animateRotors(forceMag: number, maxForce: number, delta: number) {
     const rotorEff = this.rotorHealth / 100;
@@ -1825,10 +1852,10 @@ const WEAPON_CONFIGS: Record<WeaponType, WeaponConfig> = {
   [WeaponType.MACHINE_GUN]: {
     name: 'Machine Gun',
     damage: 13,
-    fireRate: 0.065,
-    ammo: 200,
-    maxAmmo: 200,
-    reloadTime: 0,
+    fireRate: 0.055,
+    ammo: 300,
+    maxAmmo: 300,
+    reloadTime: 1.5,
     speed: 430,
     count: 2,
     spread: 0.015,
@@ -1840,9 +1867,9 @@ const WEAPON_CONFIGS: Record<WeaponType, WeaponConfig> = {
     name: 'Missile',
     damage: 55,
     fireRate: 0.95,
-    ammo: 15,
-    maxAmmo: 15,
-    reloadTime: 3.0,
+    ammo: 20,
+    maxAmmo: 20,
+    reloadTime: 2.5,
     speed: 260,
     count: 1,
     spread: 0,
@@ -1854,9 +1881,9 @@ const WEAPON_CONFIGS: Record<WeaponType, WeaponConfig> = {
     name: 'Rocket',
     damage: 80,
     fireRate: 1.45,
-    ammo: 8,
-    maxAmmo: 8,
-    reloadTime: 4.0,
+    ammo: 12,
+    maxAmmo: 12,
+    reloadTime: 3.2,
     speed: 235,
     count: 1,
     spread: 0,
@@ -1868,9 +1895,9 @@ const WEAPON_CONFIGS: Record<WeaponType, WeaponConfig> = {
     name: 'Shotgun',
     damage: 10,
     fireRate: 0.45,
-    ammo: 30,
-    maxAmmo: 30,
-    reloadTime: 2.5,
+    ammo: 40,
+    maxAmmo: 40,
+    reloadTime: 2.0,
     speed: 280,
     count: 6,
     spread: 0.3,
@@ -2411,7 +2438,7 @@ class PowerUp {
   active: boolean = true;
   position: THREE.Vector3;
   spawnTime: number = 0;
-  lifetime: number = 15; // 15 seconds lifetime
+  lifetime: number = 22; // 22 seconds lifetime
 
   constructor(
     scene: THREE.Scene,
@@ -2503,7 +2530,7 @@ class PowerUp {
     const dx = this.mesh.position.x - playerPos.x;
     const dz = this.mesh.position.z - playerPos.z;
     const distSq = dx * dx + dz * dz;
-    return distSq < 100; // Radius of 10 for easier collection
+    return distSq < 196; // Radius of 14 for easier collection
   }
 }
 
@@ -2595,6 +2622,7 @@ class ProjectilePool {
 export class GameEngine {
   scene: THREE.Scene;
   camera: THREE.PerspectiveCamera;
+  cameraLookAtTarget: THREE.Vector3 = new THREE.Vector3();
   renderer: THREE.WebGLRenderer;
   composer: EffectComposer;
   usePostProcessing = false;
@@ -2625,6 +2653,8 @@ export class GameEngine {
   leftStick: StickInput = { x: 0, y: 0, active: false };
   rightStick: StickInput = { x: 0, y: 0, active: false };
   movementTarget: THREE.Vector3 = new THREE.Vector3(0, 26, 0);
+  keyboardVelocity: THREE.Vector2 = new THREE.Vector2(0, 0);
+  hasInputThisFrame: boolean = false;
   aimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -35);
   mouseAimPoint: THREE.Vector3 = new THREE.Vector3(0, 26, -55);
   mouseAimValid: boolean = false;
@@ -2677,6 +2707,42 @@ export class GameEngine {
   powerups: PowerUp[] = [];
   powerupSpawnTimer: number = 0;
 
+  spawnPeriodicPowerUp() {
+    let type: PowerUpType;
+    const rand = Math.random();
+    
+    const weapon = this.weapons.get(this.currentWeapon);
+    const lowHealth = this.health < 40;
+    const lowFuel = this.currentFuel < 35;
+    const lowAmmo = weapon && (weapon.ammo / weapon.maxAmmo) < 0.25;
+    
+    if (lowHealth && Math.random() < 0.55) {
+      type = PowerUpType.HEALTH;
+    } else if (lowFuel && Math.random() < 0.55) {
+      type = PowerUpType.FUEL;
+    } else if (lowAmmo && Math.random() < 0.55) {
+      type = PowerUpType.AMMO;
+    } else {
+      if (rand < 0.22) type = PowerUpType.HEALTH;
+      else if (rand < 0.38) type = PowerUpType.FUEL;
+      else if (rand < 0.52) type = PowerUpType.AMMO;
+      else if (rand < 0.68) type = PowerUpType.DAMAGE_BOOST;
+      else if (rand < 0.82) type = PowerUpType.SHIELD;
+      else if (rand < 0.92) type = PowerUpType.SPEED_BOOST;
+      else type = PowerUpType.BOMB;
+    }
+    
+    const player = this.helicopter.body.position;
+    const lanes = [-52, -24, 0, 24, 52];
+    const laneX = lanes[Math.floor(Math.random() * lanes.length)] + (Math.random() - 0.5) * 8;
+    const spawnZ = player.z - 75 - Math.random() * 45;
+    const spawnY = Math.max(3.0, this.city.getHeightAt(laneX, spawnZ, 3) + 2.0);
+    
+    const pu = new PowerUp(this.scene, laneX, spawnY, spawnZ, type);
+    pu.spawnTime = performance.now() / 1000;
+    this.powerups.push(pu);
+  }
+
   // Combo System
   comboCount: number = 0;
   comboTimer: number = 0;
@@ -2687,6 +2753,12 @@ export class GameEngine {
   damageBoostTimer: number = 0;
   shieldTimer: number = 0;
   speedBoostTimer: number = 0;
+
+  // Dash variables
+  dashCooldownTimer: number = 0;
+  dashActiveTimer: number = 0;
+  dashDirection: CANNON.Vec3 = new CANNON.Vec3();
+  lastTapTime: { [key: string]: number } = {};
 
   // Hit marker for visual feedback
   hitMarkerTimer: number = 0;
@@ -2786,6 +2858,16 @@ export class GameEngine {
     this.scene.add(sunCore);
 
     this.city = new CityEnvironment(this.scene, this.world);
+    this.city.onBuildingDestroyed = (x, y, z) => {
+      if (this.volumetricExplosions) {
+        this.volumetricExplosions.spawn(x, y, z, 20, 6.0);
+      }
+      if (this.audio) {
+        this.audio.playExplosion(1.0);
+      }
+      this.cameraShake = Math.max(this.cameraShake, 3.5);
+      this.score += Math.floor(50 * this.comboMultiplier);
+    };
 
     this.helicopter = new Helicopter(this.scene, this.world);
     this.helicopter.body.addEventListener("collide", this.onHelicopterCollide);
@@ -2916,6 +2998,8 @@ export class GameEngine {
 
     this.helicopter.reset();
     this.movementTarget.set(0, 26, 0);
+    this.keyboardVelocity.set(0, 0);
+    this.hasInputThisFrame = false;
     this.aimPoint.set(0, 26, -35);
     this.mouseAimPoint.set(0, 26, -55);
     this.mouseAimValid = false;
@@ -3132,7 +3216,7 @@ export class GameEngine {
     if (distance < 0.001) return;
 
     const minAimDistance = 22;
-    const maxAimDistance = 210;
+    const maxAimDistance = 280;
     const clampedDistance = THREE.MathUtils.clamp(distance, minAimDistance, maxAimDistance);
     dx /= distance;
     dz /= distance;
@@ -3229,6 +3313,34 @@ export class GameEngine {
   onKeyDown = (e: KeyboardEvent) => {
     if (!this.isPlaying) return;
     const key = e.key.toLowerCase();
+
+    // Double tap dash triggers
+    if (!e.repeat) {
+      const doubleTapThreshold = 250;
+      const now = performance.now();
+      if (key === "a" || key === "arrowleft") {
+        if (now - (this.lastTapTime["a"] || 0) < doubleTapThreshold) {
+          this.triggerDash(-1, 0);
+        }
+        this.lastTapTime["a"] = now;
+      } else if (key === "d" || key === "arrowright") {
+        if (now - (this.lastTapTime["d"] || 0) < doubleTapThreshold) {
+          this.triggerDash(1, 0);
+        }
+        this.lastTapTime["d"] = now;
+      } else if (key === "w" || key === "arrowup") {
+        if (now - (this.lastTapTime["w"] || 0) < doubleTapThreshold) {
+          this.triggerDash(0, -1);
+        }
+        this.lastTapTime["w"] = now;
+      } else if (key === "s" || key === "arrowdown") {
+        if (now - (this.lastTapTime["s"] || 0) < doubleTapThreshold) {
+          this.triggerDash(0, 1);
+        }
+        this.lastTapTime["s"] = now;
+      }
+    }
+
     if (
       [
         "w",
@@ -3270,6 +3382,14 @@ export class GameEngine {
     }
   };
 
+  triggerDash(dx: number, dz: number) {
+    if (this.dashCooldownTimer > 0 || this.dashActiveTimer > 0) return;
+    this.dashCooldownTimer = 0.75;
+    this.dashActiveTimer = 0.28;
+    this.dashDirection.set(dx, 0, dz).normalize();
+    this.helicopter.triggerDash(dx, dz);
+  }
+
   onLeftStick = (event: Event) => {
     const detail = (event as CustomEvent<StickInput>).detail;
     this.leftStick = {
@@ -3295,25 +3415,96 @@ export class GameEngine {
   onHelicopterCollide = (e: any) => {
     const impact = Math.abs(e.contact?.getImpactVelocityAlongNormal?.() ?? 0);
     const now = performance.now() / 1000;
+    const isBuilding = e.body && e.body.type === CANNON.Body.STATIC;
+
     if (
-      impact > 3.5 &&
-      now - this.lastCollisionDamageTime > 0.35 &&
+      (impact > 3.5 || isBuilding) &&
+      now - this.lastCollisionDamageTime > 1.0 &&
       this.health > 0
     ) {
-      const dmg = Math.min(14, Math.max(3, impact * 1.1));
+      let dmg = Math.min(14, Math.max(3, impact * 1.1));
+
+      if (isBuilding) {
+        dmg = 25;
+
+        // Calculate rebound normal pointing AWAY from building
+        let nx = 0;
+        let nz = 0;
+        if (e.contact) {
+          const isBi = e.contact.bi === this.helicopter.body;
+          const normal = e.contact.ni;
+          nx = isBi ? -normal.x : normal.x;
+          nz = isBi ? -normal.z : normal.z;
+        }
+
+        // Fallback if normal calculations yield zero or e.contact is missing
+        if (nx === 0 && nz === 0 && e.body) {
+          const dx = this.helicopter.body.position.x - e.body.position.x;
+          const dz = this.helicopter.body.position.z - e.body.position.z;
+          const len = Math.sqrt(dx * dx + dz * dz);
+          if (len > 0) {
+            nx = dx / len;
+            nz = dz / len;
+          } else {
+            nz = 1.0;
+          }
+        }
+
+        // Ensure normal is unit vector
+        const normalLen = Math.sqrt(nx * nx + nz * nz);
+        if (normalLen > 0) {
+          nx /= normalLen;
+          nz /= normalLen;
+        } else {
+          nz = 1.0;
+        }
+
+        // Offset explosion spawn slightly outside building bounding box
+        const spawnX = this.helicopter.body.position.x + nx * 3.0;
+        const spawnY = this.helicopter.body.position.y;
+        const spawnZ = this.helicopter.body.position.z + nz * 3.0;
+
+        // Trigger both standard GPUParticles and Volumetric Explosions outside building
+        this.particles.spawnExplosion(spawnX, spawnY, spawnZ, 120, now, 35);
+        this.volumetricExplosions.spawn(spawnX, spawnY, spawnZ, 20, 6.5);
+        
+        this.audio.playExplosion(0.8);
+        this.cameraShake = Math.max(this.cameraShake, 3.5);
+
+        // Instantly shift position away from building to break contact and prevent stuck states
+        this.helicopter.body.position.x += nx * 2.5;
+        this.helicopter.body.position.z += nz * 2.5;
+
+        // Velocity rebound
+        this.helicopter.body.velocity.x = nx * 38;
+        this.helicopter.body.velocity.z = nz * 38;
+
+        this.movementTarget.set(
+          this.helicopter.body.position.x + nx * 18,
+          this.movementTarget.y,
+          this.helicopter.body.position.z + nz * 18,
+        );
+        this.helicopter.setTarget(
+          this.movementTarget.x,
+          this.movementTarget.y,
+          this.movementTarget.z,
+        );
+      } else {
+        this.cameraShake = Math.max(this.cameraShake, Math.min(1.8, impact * 0.25));
+        this.audio.playHit();
+        this.movementTarget.set(
+          this.helicopter.body.position.x,
+          Math.max(this.helicopter.body.position.y, this.movementTarget.y),
+          this.helicopter.body.position.z,
+        );
+      }
+
+      if (this.dashActiveTimer > 0) {
+        dmg = 0;
+      }
       this.health = Math.max(0, this.health - dmg);
       this.helicopter.takeDamage(dmg);
-      this.cameraShake = Math.max(
-        this.cameraShake,
-        Math.min(1.8, impact * 0.25),
-      );
       this.lastCollisionDamageTime = now;
-      this.movementTarget.set(
-        this.helicopter.body.position.x,
-        Math.max(this.helicopter.body.position.y, this.movementTarget.y),
-        this.helicopter.body.position.z,
-      );
-      this.audio.playHit();
       this.updateUI(now);
     }
   };
@@ -3489,11 +3680,11 @@ export class GameEngine {
     } else if (weapon.blastRadius > 0) {
       // Missile / Rocket backblast
       this.particles.spawnExplosion(fxX, muzzleY, fxZ, 8, time, 6);
-      this.cameraShake = Math.max(this.cameraShake, 0.6);
+      this.cameraShake = Math.max(this.cameraShake, 0.8);
     } else {
       // Machine Gun Sparks
       for(let s=0; s<2; s++) this.particles.spawnSparks(fxX, muzzleY, fxZ, time);
-      this.cameraShake = Math.max(this.cameraShake, 0.15);
+      this.cameraShake = Math.max(this.cameraShake, 0.06); // Reduced machine gun shake for smooth arcade shooting
     }
 
     // Auto-reload if out of ammo
@@ -3645,16 +3836,29 @@ export class GameEngine {
   }
 
   dropPowerUp = (x: number, y: number, z: number) => {
-    const rand = Math.random();
     let type: PowerUpType;
-
-    if (rand <0.24) type = PowerUpType.HEALTH;
-    else if (rand <0.42) type = PowerUpType.FUEL;
-    else if (rand <0.58) type = PowerUpType.AMMO;
-    else if (rand <0.72) type = PowerUpType.DAMAGE_BOOST;
-    else if (rand <0.86) type = PowerUpType.SHIELD;
-    else if (rand <0.94) type = PowerUpType.SPEED_BOOST;
-    else type = PowerUpType.BOMB;
+    const rand = Math.random();
+    
+    const weapon = this.weapons.get(this.currentWeapon);
+    const lowHealth = this.health < 40;
+    const lowFuel = this.currentFuel < 35;
+    const lowAmmo = weapon && (weapon.ammo / weapon.maxAmmo) < 0.25;
+    
+    if (lowHealth && Math.random() < 0.5) {
+      type = PowerUpType.HEALTH;
+    } else if (lowFuel && Math.random() < 0.5) {
+      type = PowerUpType.FUEL;
+    } else if (lowAmmo && Math.random() < 0.5) {
+      type = PowerUpType.AMMO;
+    } else {
+      if (rand < 0.22) type = PowerUpType.HEALTH;
+      else if (rand < 0.38) type = PowerUpType.FUEL;
+      else if (rand < 0.52) type = PowerUpType.AMMO;
+      else if (rand < 0.68) type = PowerUpType.DAMAGE_BOOST;
+      else if (rand < 0.82) type = PowerUpType.SHIELD;
+      else if (rand < 0.92) type = PowerUpType.SPEED_BOOST;
+      else type = PowerUpType.BOMB;
+    }
 
     const pu = new PowerUp(this.scene, x, y + 2, z, type);
     pu.spawnTime = performance.now() / 1000;
@@ -3672,8 +3876,9 @@ export class GameEngine {
         if (weapon) weapon.ammo = weapon.maxAmmo;
         break;
       case PowerUpType.DAMAGE_BOOST:
-        const w = this.weapons.get(this.currentWeapon);
-        if (w) w.damage = w.damage * 2;
+        for (const [wType, config] of this.weapons.entries()) {
+          config.damage = WEAPON_CONFIGS[wType].damage * 2;
+        }
         this.damageBoostTimer = 10.0;
         break;
       case PowerUpType.SHIELD:
@@ -3806,9 +4011,9 @@ export class GameEngine {
 
   startNextWave() {
     this.currentWave++;
-    this.totalEnemiesInWave = 5 + Math.floor(this.currentWave * 4.5);
+    this.totalEnemiesInWave = 8 + Math.floor(this.currentWave * 6.5);
     this.enemiesSpawnedInWave = 0;
-    this.spawnTimer = 2.0;
+    this.spawnTimer = 1.2;
 
     // Determine wave theme / message
     if (this.currentWave === 1) {
@@ -3871,15 +4076,15 @@ export class GameEngine {
     frustum.setFromProjectionMatrix(new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse));
     const playerPos = this.helicopter.body.position;
 
-    // Safe Spawn Validation (Max 5 attempts)
-    while (attempts < 5) {
+    // Safe Spawn Validation (Max 8 attempts for better placement)
+    while (attempts < 8) {
       spot = this.getArcadeSpawnPoint(type, 0, 1);
       
       const point = new THREE.Vector3(spot.x, spot.y, spot.z);
       // Ensure it's not popping in immediately in the frustum
       if (frustum.containsPoint(point)) {
         const distSq = (spot.x - playerPos.x) ** 2 + (spot.z - playerPos.z) ** 2;
-        if (distSq < 10000) { // Keep them out of immediate view
+        if (distSq < 3600) { // Only reject if extremely close (within 60 units) to allow ahead-of-player spawn in view
           attempts++;
           continue; 
         }
@@ -3983,6 +4188,13 @@ export class GameEngine {
       return;
     }
 
+    // Periodic power-up spawning check
+    this.powerupSpawnTimer -= delta;
+    if (this.powerupSpawnTimer <= 0) {
+      this.spawnPeriodicPowerUp();
+      this.powerupSpawnTimer = 8.0 + Math.random() * 4.0;
+    }
+
     // Pause spawning during wave transitions (which are also triggered by battlefield events)
     if (this.waveTransitionTimer > 0) {
       return;
@@ -3991,12 +4203,20 @@ export class GameEngine {
     // Wave spawning logic
     if (this.enemiesSpawnedInWave < this.totalEnemiesInWave) {
       this.spawnTimer -= delta;
-      // Cap active enemies to avoid overwhelming the player
-      const maxActiveEnemies = 8 + Math.floor(this.currentWave * 1.5);
+      // Cap active enemies to avoid overwhelming the player (increased for arcade swarm feel)
+      const maxActiveEnemies = 20 + Math.floor(this.currentWave * 3.0);
       if (this.spawnTimer <= 0 && this.enemies.length < maxActiveEnemies) {
-        this.spawnEnemy();
-        // Spawning gets slightly faster in later waves
-        this.spawnTimer = Math.max(0.6, 2.2 - this.currentWave * 0.12);
+        // Spawn 1 to 2 enemies at once to increase intensity
+        const count = Math.min(
+          maxActiveEnemies - this.enemies.length,
+          this.totalEnemiesInWave - this.enemiesSpawnedInWave,
+          Math.random() < 0.4 + this.currentWave * 0.05 ? 2 : 1
+        );
+        for (let i = 0; i < count; i++) {
+          this.spawnEnemy();
+        }
+        // Spawning gets significantly faster in later waves
+        this.spawnTimer = Math.max(0.2, 0.7 - this.currentWave * 0.06);
       }
     } else if (this.enemies.length === 0) {
       // Wave cleared! Go to next wave
@@ -4092,6 +4312,10 @@ export class GameEngine {
           7,
         );
         this.enemies.push(enemy);
+        if (this.isPlaying) {
+          this.enemiesSpawnedInWave++;
+          this.totalEnemiesInWave++;
+        }
       }
     } else {
       this.waveMessage = "AIR RAID";
@@ -4106,6 +4330,10 @@ export class GameEngine {
           player.y + 2 + Math.random() * 14,
         );
         this.enemies.push(enemy);
+        if (this.isPlaying) {
+          this.enemiesSpawnedInWave++;
+          this.totalEnemiesInWave++;
+        }
       }
     }
   }
@@ -4135,6 +4363,7 @@ export class GameEngine {
       gp.buttons.some((b) => b.pressed);
 
     if (Math.abs(aimX) > DEADZONE || Math.abs(aimY) > DEADZONE) {
+      this.hasInputThisFrame = true;
       // Circular deadzone/curve for smoother input
       const mag = Math.sqrt(aimX * aimX + aimY * aimY);
       const normX = aimX / mag;
@@ -4146,7 +4375,6 @@ export class GameEngine {
 
       const yMove = this.settings.invertedY ? -normY : normY;
       this.movementTarget.z += yMove * curvedMag * moveSpeed;
-      this.clampMovementTarget();
 
       // Resume audio on stick move
       this.audio.resume();
@@ -4169,6 +4397,7 @@ export class GameEngine {
   }
 
   updateKeyboardMovement(delta: number) {
+    if (this.dashActiveTimer > 0) return;
     let moveX = 0;
     let moveZ = 0;
 
@@ -4200,46 +4429,66 @@ export class GameEngine {
     )
       moveY -= 1;
 
+    // Normalize desired keyboard input vector
     const mag = Math.sqrt(moveX * moveX + moveZ * moveZ);
+    let normX = 0;
+    let normZ = 0;
     if (mag > 0) {
-      const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1;
-      const moveSpeed = (this.leftStick.active ? 96 : 82) * speedBoost;
-      const cappedMag = Math.min(1, mag);
-      this.movementTarget.x += (moveX / mag) * cappedMag * moveSpeed * delta;
-      this.movementTarget.z += (moveZ / mag) * cappedMag * moveSpeed * delta;
-    } else {
-      this.movementTarget.x +=
-        (this.helicopter.body.position.x - this.movementTarget.x) *
-        Math.min(1, delta * 1.8);
-      this.movementTarget.z +=
-        (this.helicopter.body.position.z - this.movementTarget.z) *
-        Math.min(1, delta * 1.8);
+      normX = moveX / mag;
+      normZ = moveZ / mag;
     }
 
+    // Arcade style: instant snap to the desired input vector with no acceleration ramp
+    const targetMag = Math.min(1, mag);
+    this.keyboardVelocity.x = normX * targetMag;
+    this.keyboardVelocity.y = normZ * targetMag;
+
+    const inputLength = this.keyboardVelocity.length();
+    if (inputLength > 0.005) {
+      this.hasInputThisFrame = true;
+      const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1;
+      // Arcade style: High target speed so the target jumps to the tight clamp boundary almost instantly
+      const moveSpeed = (this.leftStick.active ? 220 : 220) * speedBoost;
+      this.movementTarget.x += this.keyboardVelocity.x * moveSpeed * delta;
+      this.movementTarget.z += this.keyboardVelocity.y * moveSpeed * delta;
+    }
+
+    // Always apply auto-scroll forward
     this.movementTarget.z -= this.autoScrollSpeed * delta;
 
     if (moveY !== 0) {
+      this.hasInputThisFrame = true;
       const climbSpeed = 34;
       this.movementTarget.y += moveY * climbSpeed * delta;
     } else {
       this.movementTarget.y +=
         (this.helicopter.body.position.y - this.movementTarget.y) *
-        Math.min(1, delta * 1.2);
+        Math.min(1, delta * 8.0);
     }
-
-    this.clampMovementTarget();
   }
 
   clampMovementTarget() {
+    // 1. Clamp to global screen boundary constraints
     this.movementTarget.x = Math.max(
       -190,
       Math.min(190, this.movementTarget.x),
     );
-    this.movementTarget.z = Math.max(
-      this.helicopter.body.position.z - 215,
-      Math.min(this.helicopter.body.position.z + 75, this.movementTarget.z),
+    
+    // 2. Clamp relative to helicopter's actual physical position
+    // Arcade style: keep the target very close to the helicopter so direction changes are near-instantaneous
+    const hPos = this.helicopter.body.position;
+    this.movementTarget.x = Math.max(
+      hPos.x - 12,
+      Math.min(hPos.x + 12, this.movementTarget.x),
     );
-    this.movementTarget.y = Math.max(15, Math.min(58, this.movementTarget.y));
+    this.movementTarget.z = Math.max(
+      hPos.z - 12,
+      Math.min(hPos.z + 12, this.movementTarget.z),
+    );
+    this.movementTarget.y = Math.max(
+      Math.max(15, hPos.y - 12),
+      Math.min(Math.min(58, hPos.y + 12), this.movementTarget.y),
+    );
   }
 
   tick = () => {
@@ -4258,8 +4507,33 @@ export class GameEngine {
       return;
     }
 
+    this.hasInputThisFrame = false;
     this.pollGamepad(time, delta);
     this.updateKeyboardMovement(delta);
+
+    // Update dash timers and mechanics
+    if (this.dashCooldownTimer > 0) {
+      this.dashCooldownTimer -= delta;
+    }
+    if (this.dashActiveTimer > 0) {
+      this.dashActiveTimer -= delta;
+      const speedBoost = this.speedBoostTimer > 0 ? 1.24 : 1.0;
+      const dashSpeed = 155 * speedBoost;
+      this.helicopter.body.velocity.x = this.dashDirection.x * dashSpeed;
+      this.helicopter.body.velocity.z = this.dashDirection.z * dashSpeed;
+      
+      // Match the target position directly to prevent drag-back when dash ends
+      this.movementTarget.x = this.helicopter.body.position.x;
+      this.movementTarget.z = this.helicopter.body.position.z;
+    }
+
+    // Apply unified post-input target decay back to player position when idle
+    if (!this.hasInputThisFrame) {
+      // Arcade style: Instant snap to body position for immediate braking
+      this.movementTarget.x = this.helicopter.body.position.x;
+      this.movementTarget.z = this.helicopter.body.position.z;
+    }
+    this.clampMovementTarget();
     this.currentFuel = Math.max(
       0,
       this.currentFuel - this.fuelDrainPerSecond * delta,
@@ -4473,8 +4747,10 @@ export class GameEngine {
 
         // Tanks do massive ram damage
         const dmg = e.type === EnemyType.TANK ? 30 : 10;
-        this.health = Math.max(0, this.health - dmg);
-        this.helicopter.takeDamage(dmg);
+        if (this.dashActiveTimer <= 0) {
+          this.health = Math.max(0, this.health - dmg);
+          this.helicopter.takeDamage(dmg);
+        }
         this.updateUI(time);
       }
     }
@@ -4555,8 +4831,8 @@ export class GameEngine {
         this.score += Math.floor(enemy.basePoints * this.comboMultiplier);
         this.updateUI(time);
 
-        // Drop power-up chance (20% base, higher for tanks)
-        const dropChance = enemy.type === EnemyType.TANK ? 0.5 : 0.2;
+        // Drop power-up chance (increased for arcade shoot-em-up intensity)
+        const dropChance = enemy.type === EnemyType.TANK ? 0.65 : enemy.type === EnemyType.BOSS ? 1.0 : 0.35;
         if (Math.random() < dropChance) {
           this.dropPowerUp(enemy.body.position.x, enemy.body.position.y, enemy.body.position.z);
         }
@@ -4579,8 +4855,8 @@ export class GameEngine {
       this.helicopter.body.position,
       (proj) => {
         if (this.health > 0) {
-          // Shield protects from damage
-          if (this.shieldTimer > 0) {
+          // Shield or dash protects from damage
+          if (this.shieldTimer > 0 || this.dashActiveTimer > 0) {
             this.particles.spawnExplosion(
               proj.pos.x,
               proj.pos.y,
@@ -4642,9 +4918,10 @@ export class GameEngine {
     if (this.damageBoostTimer > 0) {
       this.damageBoostTimer -= delta;
       if (this.damageBoostTimer <= 0) {
-        // Reset damage boost
-        const weapon = this.weapons.get(this.currentWeapon);
-        if (weapon) weapon.damage = WEAPON_CONFIGS[this.currentWeapon].damage;
+        // Reset damage boost for all weapons
+        for (const [wType, config] of this.weapons.entries()) {
+          config.damage = WEAPON_CONFIGS[wType].damage;
+        }
       }
     }
     if (this.shieldTimer > 0) {
