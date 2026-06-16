@@ -6,12 +6,91 @@ import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPa
 import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
 import { AudioManager } from "./audio";
 
-const SKY_CLEAR_COLOR = 0x78cfe0;
-const SKY_STORM_COLOR = 0x51647f;
-const FOG_CLEAR_COLOR = 0x86d4df;
-const FOG_STORM_COLOR = 0x29364f;
+const SKY_CLEAR_COLOR = 0xbfe6f5;
+const SKY_STORM_COLOR = 0x6a7d96;
+const FOG_CLEAR_COLOR = 0xd6eef7;
+const FOG_STORM_COLOR = 0x3a4860;
 const TARGET_RENDER_FPS = 60;
 const MAX_RENDER_PIXEL_RATIO = 1.0;
+
+// --- BIOME SYSTEM ---
+
+/** All terrain biomes the world generator can produce. */
+type BiomeName = "city" | "base" | "refinery" | "desert" | "forest" | "ruins";
+
+/**
+ * Number of consecutive chunks that share a biome. Grouping chunks into bands
+ * makes each biome read as a deliberate "stretch" the player flies through
+ * instead of flickering from chunk to chunk.
+ */
+const BIOME_BAND_LENGTH = 5;
+
+/** Order biomes cycle through as the player progresses. */
+const BIOME_SEQUENCE: BiomeName[] = [
+  "city",
+  "desert",
+  "ruins",
+  "forest",
+  "base",
+  "refinery",
+];
+
+/** Visual atmosphere applied per biome: clear-weather sky/fog tint and base fog density. */
+type BiomeAtmosphere = {
+  sky: number;
+  fog: number;
+  fogDensity: number;
+  /** Hemisphere light sky/ground tints used to shade the world for the biome. */
+  ambientSky: number;
+  ambientGround: number;
+};
+
+const BIOME_ATMOSPHERE: Record<BiomeName, BiomeAtmosphere> = {
+  city: {
+    sky: 0xbfe6f5,
+    fog: 0xd6eef7,
+    fogDensity: 0.0024,
+    ambientSky: 0xffffff,
+    ambientGround: 0xb3c0c8,
+  },
+  desert: {
+    sky: 0xf2e2bd,
+    fog: 0xf0e3c6,
+    fogDensity: 0.0022,
+    ambientSky: 0xfff6e2,
+    ambientGround: 0xcdb487,
+  },
+  ruins: {
+    sky: 0xc7cdd4,
+    fog: 0xcfd4da,
+    fogDensity: 0.0032,
+    ambientSky: 0xf2f4f6,
+    ambientGround: 0x9a9ea6,
+  },
+  forest: {
+    sky: 0xcdeed5,
+    fog: 0xd5edda,
+    fogDensity: 0.0028,
+    ambientSky: 0xf3fbf2,
+    ambientGround: 0x8fae93,
+  },
+  base: {
+    sky: 0xd2e4f0,
+    fog: 0xdce9f2,
+    fogDensity: 0.0024,
+    ambientSky: 0xf6fbff,
+    ambientGround: 0xa9b6c0,
+  },
+  refinery: {
+    sky: 0xe6dcc8,
+    fog: 0xe2d8c4,
+    fogDensity: 0.0034,
+    ambientSky: 0xfff2dc,
+    ambientGround: 0xb3a488,
+  },
+};
+
+
 
 // --- TEXTURE SYSTEM ---
 export class TextureManager {
@@ -116,9 +195,9 @@ function createSkyDome() {
     side: THREE.BackSide,
     depthWrite: false,
     uniforms: {
-      topColor: { value: new THREE.Color(0x1f4f97) },
-      horizonColor: { value: new THREE.Color(0x78cfe0) },
-      sunColor: { value: new THREE.Color(0xffc66d) },
+      topColor: { value: new THREE.Color(0x5fa8e6) },
+      horizonColor: { value: new THREE.Color(0xd6eef7) },
+      sunColor: { value: new THREE.Color(0xfff2cf) },
     },
     vertexShader: `
       varying vec3 vWorldPosition;
@@ -318,6 +397,12 @@ class CityEnvironment {
     return height;
   }
 
+  /** Returns the biome at a given world-Z (maps Z to its chunk, then to a biome). */
+  getBiomeAt(z: number): BiomeName {
+    const id = Math.floor(z / this.chunkDepth);
+    return this.zoneForChunk(id);
+  }
+
   private generateChunk(id: number, world: CANNON.World) {
     const chunk: WorldChunk = {
       id,
@@ -331,19 +416,20 @@ class CityEnvironment {
 
     const zone = this.zoneForChunk(id);
     const chunkCenterZ = id * this.chunkDepth;
+    // Grass/terrain ground tones per biome (bright, like the reference art).
     const groundColors: Record<string, number> = {
-      city: 0x74e4ed,
-      base: 0x737c8d,
-      refinery: 0x565f6d,
-      desert: 0xd6b55b,
-      forest: 0x3f8c5d,
-      ruins: 0x7e7d86,
+      city: 0x8ed16a,
+      base: 0x9bcf72,
+      refinery: 0xb8b89c,
+      desert: 0xe3cd92,
+      forest: 0x6fb23f,
+      ruins: 0xb0b4a8,
     };
     const ground = createBox(420, 0.8, this.chunkDepth - 0.4, groundColors[zone]);
     ground.position.set(0, -0.62, chunkCenterZ);
     chunk.group.add(ground);
 
-    const road = createBox(18, 0.12, this.chunkDepth - 0.4, 0x243044);
+    const road = createBox(18, 0.12, this.chunkDepth - 0.4, 0x6c7178);
     road.position.set(this.hash(id, 99) > 0.5 ? -34 : 34, -0.16, chunkCenterZ);
     chunk.group.add(road);
     this.addGroundDressing(chunk, zone, chunkCenterZ, road.position.x, id);
@@ -378,13 +464,15 @@ class CityEnvironment {
     local: number,
   ) {
     const seed = this.hash(chunk.id, gx * 97 + local * 131);
+    // Bright, clean building tints inspired by isometric city art:
+    // mostly white/light with subtle blue, beige, and grey variants.
     const palettes: Record<string, number[]> = {
-      city: [0x2742a0, 0x3155b7, 0x3f67c9, 0x24377e, 0x547bdf],
-      base: [0x4b5361, 0x687182, 0x323946, 0x73827b],
-      refinery: [0x303a47, 0x596675, 0x745c37, 0x222832],
-      desert: [0xc3a94e, 0xb78f42, 0x9b7841, 0xd2bf77],
-      forest: [0x224c38, 0x315f41, 0x4d6d4b, 0x20362f],
-      ruins: [0x4d5366, 0x696a77, 0x3f4455, 0x7a6f69],
+      city: [0xf3f6fa, 0xe6edf5, 0xd8e2ee, 0xeef2f7, 0xc9d6e6],
+      base: [0xeef1f4, 0xdfe5ea, 0xf4f6f8, 0xcdd5dc],
+      refinery: [0xe4e7ea, 0xd2d7dc, 0xcdb89a, 0xbfc4c9],
+      desert: [0xf0e6c8, 0xe7d6a8, 0xddc790, 0xf5ecd2],
+      forest: [0xeef2ee, 0xdbe6da, 0xc7d8c6, 0xf2f5f1],
+      ruins: [0xdadcd8, 0xc6c8c2, 0xe2e3df, 0xb7b9b3],
     };
     const colors = palettes[zone];
     const color = colors[Math.floor(seed * colors.length)];
@@ -397,9 +485,26 @@ class CityEnvironment {
     building.position.set(x, height / 2, z);
     chunk.group.add(building);
 
-    const cap = createBox(width + 1.8, 1, depth + 1.8, color);
-    cap.position.set(x, height + 0.5, z);
-    chunk.group.add(cap);
+    // Low houses get a pitched orange/terracotta roof; taller buildings keep a flat cap.
+    const isHouse = !skyscraper && height < 16;
+    const capExtras: THREE.Mesh[] = [];
+    if (isHouse && seed > 0.4) {
+      const roofColors = [0xd9622b, 0xc8531f, 0xe07b3a, 0xb84a22];
+      const roofColor = roofColors[Math.floor(this.hash(chunk.id, gx * 7 + local) * roofColors.length)];
+      const roof = createBox(width + 1.4, 1.6, depth + 1.4, roofColor);
+      roof.position.set(x, height + 0.8, z);
+      roof.rotation.y = 0;
+      chunk.group.add(roof);
+      const ridge = createBox(width + 1.4, 1.0, 2.2, roofColor);
+      ridge.position.set(x, height + 1.6, z);
+      chunk.group.add(ridge);
+      capExtras.push(roof, ridge);
+    } else {
+      const cap = createBox(width + 1.8, 1, depth + 1.8, 0xf5f7fa);
+      cap.position.set(x, height + 0.5, z);
+      chunk.group.add(cap);
+      capExtras.push(cap);
+    }
 
     const facadeDetails = this.addBuildingFacadeDetails(
       chunk,
@@ -431,7 +536,7 @@ class CityEnvironment {
       depth: depth + 1.8,
       height: height + 1,
       chunkId: chunk.id,
-      meshes: [building, cap, ...facadeDetails],
+      meshes: [building, ...capExtras, ...facadeDetails],
       body,
       hp: maxHp,
       maxHp,
@@ -453,42 +558,42 @@ class CityEnvironment {
     seed: number,
   ) {
     const details: THREE.Mesh[] = [];
-    const isLitZone = zone === "city" || zone === "base" || zone === "refinery";
+
+    // Flat, non-glowing window grids in the blue-glass tones of the reference art.
     const windowColor =
-      zone === "refinery"
-        ? 0xff8f2a
-        : zone === "base"
-          ? 0xb8f1ff
+      zone === "desert"
+        ? 0x8fb7d6
+        : zone === "forest"
+          ? 0x86b4c9
           : zone === "ruins"
-            ? 0x8bd0ff
-            : 0x9ff7ff;
-    const trimColor = zone === "desert" ? 0xf7d36f : zone === "forest" ? 0x5cc47a : 0x75b8ff;
-    const bandCount = isLitZone ? Math.max(1, Math.min(3, Math.floor(height / 10))) : 1;
+            ? 0x9aa6b0
+            : 0x6f9fd0;
 
-    for (let i = 0; i < bandCount; i++) {
-      const y = 3.4 + i * (height / (bandCount + 0.45));
-      const bandHeight = isLitZone ? 0.34 : 0.22;
-      const lit = isLitZone && this.hash(chunk.id, Math.floor(seed * 1000) + i * 29) > 0.18;
-      const materialColor = lit ? windowColor : trimColor;
-      const opacity = lit ? 0.62 : 0.28;
+    // Window rows climb the front face; columns are spaced across the width.
+    const rows = Math.max(1, Math.floor(height / 4.2));
+    const cols = Math.max(2, Math.floor(width / 3.0));
+    const winW = (width * 0.7) / cols;
+    const winH = 1.5;
+    const startX = x - (width * 0.7) / 2 + winW / 2;
+    const faceZ = z + depth * 0.5 + 0.06;
 
-      const front = createGlowBox(width * 0.62, bandHeight, 0.08, materialColor, opacity);
-      front.position.set(x, y, z + depth * 0.5 + 0.08);
-      chunk.group.add(front);
-      details.push(front);
-
-      if (isLitZone && i % 2 === 0) {
-        const side = seed > 0.5 ? 1 : -1;
-        const sideBand = createGlowBox(0.08, bandHeight, depth * 0.42, materialColor, opacity * 0.4);
-        sideBand.position.set(x + side * (width * 0.5 + 0.08), y, z);
-        chunk.group.add(sideBand);
-        details.push(sideBand);
+    for (let r = 0; r < rows; r++) {
+      const wy = 3.0 + r * 4.0;
+      if (wy > height - 1.2) break;
+      for (let c = 0; c < cols; c++) {
+        // Pseudo-random per-window so some panes are slightly darker, like real glass.
+        const lit = this.hash(chunk.id, Math.floor(seed * 500) + r * 31 + c * 7) > 0.32;
+        const pane = createBox(winW * 0.78, winH, 0.12, lit ? windowColor : 0x4f6f93);
+        pane.position.set(startX + c * winW, wy, faceZ);
+        chunk.group.add(pane);
+        details.push(pane);
       }
     }
 
-    if (height > 18 && seed > 0.42) {
-      const beacon = createGlowBox(1.2, 0.5, 1.2, seed > 0.7 ? 0xff3344 : 0xffe66d, 0.9);
-      beacon.position.set(x, height + 1.22, z + depth * 0.18);
+    // Rooftop beacon on tall towers (kept as a subtle accent, not a neon blob).
+    if (height > 20 && seed > 0.5) {
+      const beacon = createGlowBox(0.9, 0.4, 0.9, 0xff5a5a, 0.85);
+      beacon.position.set(x, height + 1.2, z + depth * 0.18);
       chunk.group.add(beacon);
       details.push(beacon);
     }
@@ -506,54 +611,89 @@ class CityEnvironment {
     seed: number,
   ) {
     if (seed > 0.86) {
-      const helipad = createBox(Math.min(width, 10), 0.22, Math.min(depth, 10), 0x1b2740);
+      const helipad = createBox(Math.min(width, 10), 0.22, Math.min(depth, 10), 0xb9c0c6);
       helipad.position.set(x, height + 1.18, z);
       chunk.group.add(helipad);
       
-      const hMarker = createBox(3.5, 0.28, 3.5, 0xe9df9a);
+      const hMarker = createBox(3.5, 0.28, 3.5, 0xf3f4f2);
       hMarker.position.set(x, height + 1.22, z);
       chunk.group.add(hMarker);
     } else if (seed > 0.75) {
-      const tower = createBox(0.8, 7, 0.8, 0x151b2c);
+      const tower = createBox(0.8, 7, 0.8, 0x9aa2ab);
       tower.position.set(x + width * 0.22, height + 4.2, z - depth * 0.18);
       chunk.group.add(tower);
-      const dish = createBox(3.2, 0.35, 1.2, 0xaee9ff);
+      const dish = createBox(3.2, 0.35, 1.2, 0xdfeef5);
       dish.position.set(tower.position.x, height + 8, tower.position.z);
       dish.rotation.z = Math.PI / 7;
       chunk.group.add(dish);
     } else if (seed > 0.55) {
       // Multiple AC Units
       for (let i=0; i<3; i++) {
-        const ac = createBox(1.5, 1.4, 1.5, 0x222b39);
+        const ac = createBox(1.5, 1.4, 1.5, 0xc4cace);
         ac.position.set(x - width*0.15 + i*2.5, height + 1.7, z + depth*0.15);
         chunk.group.add(ac);
       }
     } else {
       // Water Tower
-      const legs = createBox(2, 3, 2, 0x222b39);
+      const legs = createBox(2, 3, 2, 0xaeb4ba);
       legs.position.set(x, height + 2.5, z);
-      const tank = createBox(2.8, 3, 2.8, 0x4a5369);
+      const tank = createBox(2.8, 3, 2.8, 0xd2d7db);
       tank.position.set(x, height + 5.5, z);
       chunk.group.add(legs, tank);
     }
   }
 
   private addBridge(chunk: WorldChunk, z: number) {
-    const bridge = createBox(160, 2, 16, 0x4a5369);
+    const bridge = createBox(160, 2, 16, 0xb7bcc1);
     bridge.position.set(0, 5, z);
     chunk.group.add(bridge);
     for (let i = -3; i <= 3; i++) {
-      const support = createBox(2, 10, 2, 0x32394a);
+      const support = createBox(2, 10, 2, 0x9aa0a6);
       support.position.set(i * 24, 2.2, z);
       chunk.group.add(support);
     }
   }
 
+  /**
+   * Adds a rounded, leafy tree (rounded crown + trunk) like the reference art.
+   * Purely decorative — no physics body, so it never affects building collisions.
+   */
+  private addTree(chunk: WorldChunk, x: number, z: number, seed: number) {
+    const scale = 0.85 + seed * 0.7;
+    const trunkH = 2.4 * scale;
+    const trunk = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.32 * scale, 0.42 * scale, trunkH, 6),
+      createLowPolyMaterial(0x8a5a32),
+    );
+    trunk.position.set(x, trunkH / 2, z);
+    chunk.group.add(trunk);
+
+    // Two-tone rounded canopy: a couple of stacked low-poly spheres.
+    const greens = [0x4f9e3a, 0x5bb045, 0x67c04f, 0x469033];
+    const crownColor = greens[Math.floor(seed * greens.length)];
+    const r = 2.0 * scale;
+    const crownLow = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(r, 0),
+      createLowPolyMaterial(crownColor),
+    );
+    crownLow.position.set(x, trunkH + r * 0.7, z);
+    crownLow.rotation.y = seed * Math.PI;
+    chunk.group.add(crownLow);
+
+    const crownTop = new THREE.Mesh(
+      new THREE.IcosahedronGeometry(r * 0.72, 0),
+      createLowPolyMaterial(crownColor),
+    );
+    crownTop.position.set(x, trunkH + r * 1.5, z);
+    crownTop.rotation.y = seed * 2.1;
+    chunk.group.add(crownTop);
+  }
+
   private addSmokeColumn(chunk: WorldChunk, z: number) {
     for (let i = 0; i < 4; i++) {
-      const smoke = createBox(5 + i * 2, 6 + i * 3, 5 + i * 2, 0x1f252c);
+      const smoke = createBox(5 + i * 2, 6 + i * 3, 5 + i * 2, 0xdfe4e8);
       smoke.material.transparent = true;
-      smoke.material.opacity = 0.18;
+      smoke.material.opacity = 0.12;
       smoke.position.set(-70 + i * 10, 5 + i * 5, z - 18 + i * 4);
       chunk.group.add(smoke);
     }
@@ -568,51 +708,46 @@ class CityEnvironment {
   ) {
     // No central lane box: removing it stops the play area from looking like the player is flying down the middle of a highway/runway.
 
-    const shoulderColor = zone === "desert" ? 0xb99643 : zone === "forest" ? 0x2f744e : 0x38495d;
+    // Light sidewalk/curb shoulders flanking the road.
+    const shoulderColor = zone === "desert" ? 0xcdb789 : zone === "forest" ? 0xb8c9b0 : 0xb9c0c6;
     for (const side of [-1, 1]) {
-      const shoulder = createBox(4, 0.05, this.chunkDepth - 0.6, shoulderColor);
+      const shoulder = createBox(4, 0.06, this.chunkDepth - 0.6, shoulderColor);
       shoulder.position.set(roadX + side * 12.5, -0.02, chunkCenterZ);
       chunk.group.add(shoulder);
     }
 
     for (let i = -3; i <= 3; i++) {
-      const stripe = createBox(1.2, 0.09, 7, 0xe9df9a);
+      // Crisp white centre-line dashes, like the reference road markings.
+      const stripe = createBox(0.9, 0.1, 6, 0xf3f4f2);
       stripe.position.set(roadX, -0.04, chunkCenterZ + i * 18);
       chunk.group.add(stripe);
-
-      const runwayGlow = createGlowBox(0.75, 0.06, 2.5, i % 2 === 0 ? 0x7ff6ff : 0xffe66d, 0.34);
-      runwayGlow.position.set(roadX + (i % 2 === 0 ? -8.6 : 8.6), 0.03, chunkCenterZ + i * 18 + 5);
-      chunk.group.add(runwayGlow);
 
       // Ambient Traffic (Static Cars)
       if (this.hash(id, i * 43) > 0.4) {
         const isForward = this.hash(id, i * 17) > 0.5;
         const carLane = isForward ? 4.5 : -4.5;
         const carZ = chunkCenterZ + i * 18 + (this.hash(id, i * 11) - 0.5) * 10;
-        
-        const carColor = [0x992222, 0x225599, 0x999999, 0x222222, 0x887722][Math.floor(this.hash(id, i * 3) * 5)];
+
+        // Brighter, cleaner car body colours.
+        const carColor = [0xd23b3b, 0x3b6fd2, 0xe8e8e8, 0xf4c542, 0x4caf6e][Math.floor(this.hash(id, i * 3) * 5)];
         const carBody = createBox(2.8, 1.2, 5.5, carColor);
         carBody.position.set(roadX + carLane, 0.6, carZ);
-        
-        const carRoof = createBox(2.4, 0.8, 3.0, 0x111111);
+
+        const carRoof = createBox(2.4, 0.8, 3.0, 0xf0f0f0);
         carRoof.position.set(roadX + carLane, 1.6, carZ - 0.5);
 
-        const headlightColor = isForward ? 0xfff3b0 : 0xff3344;
-        const headlightZ = carZ + (isForward ? -3.05 : 3.05);
-        const headlight = createGlowBox(2.2, 0.24, 0.18, headlightColor, 0.68);
-        headlight.position.set(roadX + carLane, 0.86, headlightZ);
-        
-        chunk.group.add(carBody, carRoof, headlight);
+        chunk.group.add(carBody, carRoof);
       }
     }
 
+    // Bright grass/lawn patches in green and biome-tinted tones.
     const detailPalettes: Record<string, number[]> = {
-      city: [0x5bbdcc, 0x4ea3bc, 0x6ac8cf, 0x596c86],
-      base: [0x5b6574, 0x444d5b, 0x6d786d, 0x303947],
-      refinery: [0x454f5d, 0x313946, 0x69573d, 0x202832],
-      desert: [0xcaa84e, 0xb98e3f, 0xd0ba65, 0x98713d],
-      forest: [0x2f7249, 0x24583f, 0x3f8559, 0x1f4634],
-      ruins: [0x676978, 0x555967, 0x77736e, 0x454a57],
+      city: [0x8fd267, 0x7cc457, 0x9bd97a, 0x86cf63],
+      base: [0x93cf6e, 0x82c25c, 0xa0d77f, 0x8acb66],
+      refinery: [0xc2c4ad, 0xb4b69d, 0xa9ab92, 0xcccdb8],
+      desert: [0xe6d199, 0xddc486, 0xecdaa8, 0xd4b878],
+      forest: [0x5fa83c, 0x4f9532, 0x6cb547, 0x57a035],
+      ruins: [0xb6b9ab, 0xa7aa9c, 0xc3c6b8, 0x9ea191],
     };
     const palette = detailPalettes[zone] ?? detailPalettes.city;
 
@@ -633,23 +768,23 @@ class CityEnvironment {
       chunk.group.add(patch);
     }
 
-    for (let i = 0; i < 8; i++) {
+    // Trees: lush and frequent everywhere except bare desert/refinery, matching
+    // the leafy reference art. Rocks fill in the arid biomes.
+    const treeCount = zone === "forest" ? 14 : zone === "desert" || zone === "refinery" ? 4 : 9;
+    for (let i = 0; i < treeCount; i++) {
       const seed = this.hash(id, i * 83 + 31);
       const x = -185 + this.hash(id, i * 89 + 37) * 370;
       const z = chunkCenterZ - this.chunkDepth * 0.45 + this.hash(id, i * 97 + 43) * this.chunkDepth * 0.9;
-      if (Math.abs(x) < 35 || Math.abs(x - roadX) < 20) continue;
+      if (Math.abs(x) < 30 || Math.abs(x - roadX) < 18) continue;
 
-      if (zone === "forest" && seed > 0.25) {
-        const trunk = createBox(0.8, 3.2, 0.8, 0x473820);
-        trunk.position.set(x, 1.35, z);
-        const crown = createBox(4 + seed * 2, 4 + seed * 2.5, 4 + seed * 2, 0x1e5b39);
-        crown.position.set(x, 4.0, z);
-        chunk.group.add(trunk, crown);
-      } else {
-        const rock = createBox(2 + seed * 4, 0.6 + seed * 1.3, 2 + seed * 4, zone === "desert" ? 0x8f7646 : 0x3d4652);
-        rock.position.set(x, rock.geometry.boundingBox ? 0.2 : 0.25, z);
+      const arid = zone === "desert" || zone === "refinery";
+      if (arid && seed < 0.6) {
+        const rock = createBox(2 + seed * 4, 0.6 + seed * 1.3, 2 + seed * 4, zone === "desert" ? 0xc9ac72 : 0xa9aba0);
+        rock.position.set(x, 0.4, z);
         rock.rotation.y = seed * Math.PI;
         chunk.group.add(rock);
+      } else {
+        this.addTree(chunk, x, z, seed);
       }
     }
 
@@ -662,13 +797,13 @@ class CityEnvironment {
       pole.position.set(lampX, 2.45, lampZ);
       const arm = createBox(3.4, 0.18, 0.18, 0x1a2333);
       arm.position.set(lampX - side * 1.5, 5.0, lampZ);
-      const lamp = createGlowBox(1.1, 0.38, 1.1, zone === "desert" ? 0xffd487 : 0x9ff7ff, 0.62);
+      const lamp = createGlowBox(1.1, 0.38, 1.1, zone === "desert" ? 0xffe6b0 : 0xeaf6ff, 0.4);
       lamp.position.set(lampX - side * 3.0, 4.88, lampZ);
       chunk.group.add(pole, arm, lamp);
     }
 
     if (Math.abs(id) % 3 === 1) {
-      const crater = createBox(16, 0.05, 12, 0x242831);
+      const crater = createBox(16, 0.05, 12, 0xcdbf9a);
       crater.position.set(roadX > 0 ? -84 : 84, -0.02, chunkCenterZ + (this.hash(id, 203) - 0.5) * 52);
       crater.rotation.y = this.hash(id, 211) * Math.PI;
       chunk.group.add(crater);
@@ -684,9 +819,16 @@ class CityEnvironment {
     }
   }
 
-  private zoneForChunk(id: number) {
-    const zones = ["city", "city", "ruins", "refinery", "city", "city"];
-    return zones[Math.abs(Math.floor(this.hash(id, 17) * zones.length)) % zones.length];
+  private zoneForChunk(id: number): BiomeName {
+    // Group chunks into fixed-length bands so each biome persists for several
+    // chunks, then walk the biome sequence one band at a time. This produces a
+    // coherent journey (city -> desert -> ruins -> ...) instead of biomes
+    // flickering from chunk to chunk.
+    const band = Math.floor(id / BIOME_BAND_LENGTH);
+    const index =
+      ((band % BIOME_SEQUENCE.length) + BIOME_SEQUENCE.length) %
+      BIOME_SEQUENCE.length;
+    return BIOME_SEQUENCE[index];
   }
 
   private hash(a: number, b: number) {
@@ -964,24 +1106,56 @@ class WeatherSystem {
   fogColor: number = 0x06111a;
   lastLightningTime: number = 0;
   isLightning: boolean = false;
-  private clearColor = new THREE.Color(SKY_CLEAR_COLOR);
+
+  // Current (smoothed) clear-weather atmosphere, lerped toward the active biome.
+  private biomeSky = new THREE.Color(SKY_CLEAR_COLOR);
+  private biomeFog = new THREE.Color(FOG_CLEAR_COLOR);
+  private biomeFogDensity = 0.0058;
+  // Targets the biome system pushes in; the smoothed values chase these.
+  private targetSky = new THREE.Color(SKY_CLEAR_COLOR);
+  private targetFog = new THREE.Color(FOG_CLEAR_COLOR);
+  private targetFogDensity = 0.0058;
+
   private stormColor = new THREE.Color(SKY_STORM_COLOR);
-  private clearFog = new THREE.Color(FOG_CLEAR_COLOR);
   private stormFog = new THREE.Color(FOG_STORM_COLOR);
   private tempColor = new THREE.Color();
+
+  /** Sets the clear-weather atmosphere target for the active biome. Smoothly blended in `update`. */
+  setBiomeAtmosphere(atmosphere: BiomeAtmosphere) {
+    this.targetSky.setHex(atmosphere.sky);
+    this.targetFog.setHex(atmosphere.fog);
+    this.targetFogDensity = atmosphere.fogDensity;
+  }
+
+  /** Snaps the atmosphere to a biome instantly (used on reset to avoid a visible fade-in). */
+  resetBiomeAtmosphere(atmosphere: BiomeAtmosphere) {
+    this.setBiomeAtmosphere(atmosphere);
+    this.biomeSky.copy(this.targetSky);
+    this.biomeFog.copy(this.targetFog);
+    this.biomeFogDensity = this.targetFogDensity;
+  }
 
   update(time: number, delta: number, scene: THREE.Scene) {
     // Transition intensity
     this.stormIntensity +=
       (this.targetIntensity - this.stormIntensity) * delta * 0.1;
 
-    // Fog management
-    const fogDensity = 0.0058 + this.stormIntensity * 0.018;
+    // Smoothly chase the active biome's clear-weather atmosphere so crossing a
+    // biome boundary fades rather than snaps. Frame-rate-independent blend.
+    const biomeBlend = 1 - Math.exp(-delta * 0.6);
+    this.biomeSky.lerp(this.targetSky, biomeBlend);
+    this.biomeFog.lerp(this.targetFog, biomeBlend);
+    this.biomeFogDensity +=
+      (this.targetFogDensity - this.biomeFogDensity) * biomeBlend;
+
+    // Fog: start from the biome density/color, then darken/thicken with storm.
     const fog = scene.fog as THREE.FogExp2;
-    fog.density = fogDensity;
-    fog.color.copy(this.tempColor.copy(this.clearFog).lerp(this.stormFog, this.stormIntensity));
+    fog.density = this.biomeFogDensity + this.stormIntensity * 0.018;
+    fog.color.copy(this.tempColor.copy(this.biomeFog).lerp(this.stormFog, this.stormIntensity));
     if (scene.background instanceof THREE.Color) {
-      scene.background.copy(this.tempColor.copy(this.clearColor).lerp(this.stormColor, this.stormIntensity * 0.82));
+      scene.background.copy(
+        this.tempColor.copy(this.biomeSky).lerp(this.stormColor, this.stormIntensity * 0.82),
+      );
     }
 
     // Wind Turbulance
@@ -1262,12 +1436,24 @@ const tempColor = new THREE.Color();
 const tempVec3_1 = new CANNON.Vec3();
 const tempVec3_2 = new CANNON.Vec3();
 
+// Reusable scratch colors for biome ambient-light blending (avoids per-frame allocations).
+const tempBiomeSky = new THREE.Color();
+const tempBiomeGround = new THREE.Color();
+
 class Helicopter extends Entity {
   targetPosition: THREE.Vector3;
   lastTargetPosition: THREE.Vector3;
   mainRotor: THREE.Object3D;
   tailRotor: THREE.Object3D;
   shieldMesh: THREE.Mesh | null = null;
+
+  // Rotor blade/blur materials, crossfaded by RPM for a smooth spin look.
+  mainBladeMat!: THREE.MeshLambertMaterial;
+  tailBladeMat!: THREE.MeshLambertMaterial;
+  mainBlurMat!: THREE.MeshBasicMaterial;
+  tailBlurMat!: THREE.MeshBasicMaterial;
+  rotorAngle: number = 0;
+  tailRotorAngle: number = 0;
 
   // Subsystems
   rotorHealth: number = 100;
@@ -1434,9 +1620,15 @@ class Helicopter extends Entity {
     hub.material = metalMat;
     this.mainRotor.add(hub);
 
+    // Dedicated, fadeable blade material so blades can crossfade into the blur
+    // disc at high RPM (avoids the strobing/stepping "janky" look).
+    const mainBladeMat = bladeMat.clone();
+    mainBladeMat.transparent = true;
+    this.mainBladeMat = mainBladeMat;
+
     for (let i = 0; i < 4; i++) {
       const blade = createBox(0.35, 0.05, 11.0, 0x161a18);
-      blade.material = bladeMat;
+      blade.material = mainBladeMat;
       blade.position.set(0, 0, 5.5); // Pivot at hub
       
       const bladePivot = new THREE.Group();
@@ -1448,17 +1640,17 @@ class Helicopter extends Entity {
     // Rotor Blur Disc (Transparent)
     const blurGeo = new THREE.RingGeometry(3.2, 11.5, 56);
     blurGeo.rotateX(-Math.PI / 2);
-    const blurMat = new THREE.MeshBasicMaterial({
+    const mainBlurMat = new THREE.MeshBasicMaterial({
       color: 0xd8f6ff,
       transparent: true,
-      opacity: 0.24,
+      opacity: 0.0,
       depthWrite: false,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
     });
-    const blurDisc = new THREE.Mesh(blurGeo, blurMat);
+    this.mainBlurMat = mainBlurMat;
+    const blurDisc = new THREE.Mesh(blurGeo, mainBlurMat);
     blurDisc.name = "rotorBlur";
-    blurDisc.visible = false;
     this.mainRotor.add(blurDisc);
     baseGroup.add(this.mainRotor);
 
@@ -1469,9 +1661,13 @@ class Helicopter extends Entity {
     tailHub.material = metalMat;
     this.tailRotor.add(tailHub);
 
+    const tailBladeMat = bladeMat.clone();
+    tailBladeMat.transparent = true;
+    this.tailBladeMat = tailBladeMat;
+
     for (let i = 0; i < 4; i++) {
       const blade = createBox(0.05, 1.8, 0.15, 0x161a18);
-      blade.material = bladeMat;
+      blade.material = tailBladeMat;
       blade.position.set(0, 0.9, 0); // Pivot at hub
       
       const bladePivot = new THREE.Group();
@@ -1482,9 +1678,17 @@ class Helicopter extends Entity {
     
     const tailBlurGeo = new THREE.RingGeometry(0.45, 1.9, 28);
     tailBlurGeo.rotateY(Math.PI / 2);
-    const tailBlurDisc = new THREE.Mesh(tailBlurGeo, blurMat);
+    const tailBlurMat = new THREE.MeshBasicMaterial({
+      color: 0xd8f6ff,
+      transparent: true,
+      opacity: 0.0,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    });
+    this.tailBlurMat = tailBlurMat;
+    const tailBlurDisc = new THREE.Mesh(tailBlurGeo, tailBlurMat);
     tailBlurDisc.name = "tailBlur";
-    tailBlurDisc.visible = false;
     this.tailRotor.add(tailBlurDisc);
     baseGroup.add(this.tailRotor);
 
@@ -1670,19 +1874,25 @@ class Helicopter extends Entity {
     const distToTarget = Math.sqrt(ex * ex + ez * ez);
 
     const maxCruiseSpeed = (45 + inputAgility * 15) * engineEff;
-    // Arcade style: very aggressive position tracking (high factor ensures we track the target closely)
-    let desiredVx = THREE.MathUtils.clamp(ex * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
-    let desiredVz = THREE.MathUtils.clamp(ez * 12.0, -maxCruiseSpeed, maxCruiseSpeed);
+    // Position -> desired velocity. Clamped to a sane cruise speed.
+    let desiredVx = THREE.MathUtils.clamp(ex * 8.0, -maxCruiseSpeed, maxCruiseSpeed);
+    let desiredVz = THREE.MathUtils.clamp(ez * 8.0, -maxCruiseSpeed, maxCruiseSpeed);
     const desiredSpeed = Math.sqrt(desiredVx * desiredVx + desiredVz * desiredVz);
     if (desiredSpeed > maxCruiseSpeed) {
       desiredVx = (desiredVx / desiredSpeed) * maxCruiseSpeed;
       desiredVz = (desiredVz / desiredSpeed) * maxCruiseSpeed;
     }
 
-    // Arcade style: high acceleration responsiveness (snappy start/stop) but tuned to show off braking tilt
-    const accelResponsiveness = (75 + inputAgility * 25) * rotorEff * engineEff;
-    let fx = (desiredVx - this.body.velocity.x) * this.body.mass * accelResponsiveness;
-    let fz = (desiredVz - this.body.velocity.z) * this.body.mass * accelResponsiveness;
+    // Frame-rate-independent, critically-damped velocity tracking.
+    // An exponential blend (always in 0..1) guarantees the velocity approaches
+    // the target without overshooting, which removes the high-frequency
+    // ringing/shaking the old stiff controller produced (its gain * dt exceeded
+    // the stable integration threshold of ~1.0).
+    const trackRate = (13 + inputAgility * 6) * rotorEff * engineEff;
+    const blend = 1 - Math.exp(-trackRate * delta);
+    const invDt = 1 / Math.max(delta, 1 / 120);
+    let fx = (desiredVx - this.body.velocity.x) * blend * this.body.mass * invDt;
+    let fz = (desiredVz - this.body.velocity.z) * blend * this.body.mass * invDt;
 
     // Apply Environmental Wind
     if (windForce) {
@@ -1788,34 +1998,32 @@ class Helicopter extends Entity {
 
   animateRotors(forceMag: number, maxForce: number, delta: number) {
     const rotorEff = this.rotorHealth / 100;
-    
-    // Store angular speed in radians per second so animation is independent of frame rate.
+
+    // Angular speed in radians/sec, frame-rate independent.
     const load = THREE.MathUtils.clamp(forceMag / Math.max(maxForce, 1), 0, 1);
     const targetSpeed = (42 + load * 24) * rotorEff;
     const spool = 1 - Math.exp(-delta * 8.0);
     this.rotorSpeed = THREE.MathUtils.lerp(this.rotorSpeed, targetSpeed, spool);
 
-    // Limit visual speed to prevent severe strobe/wagon-wheel effect at 60fps
-    // 25 rad/s = ~23 degrees per frame, which is safely under the 45 degree Nyquist limit for a 4-blade rotor.
-    const visualSpeed = Math.min(this.rotorSpeed, 25);
-    this.mainRotor.rotation.y -= visualSpeed * delta;
-    this.tailRotor.rotation.x -= visualSpeed * 1.35 * delta;
+    // Crossfade factor: 0 = slow (crisp blades), 1 = fast (solid blur disc).
+    // Blades stop being drawn at speed, so there is no strobing/wagon-wheel jank.
+    const blend = THREE.MathUtils.clamp((this.rotorSpeed - 9) / 13, 0, 1);
+    const smoothBlend = blend * blend * (3 - 2 * blend); // smoothstep
 
-    // Toggle Blur meshes based on speed
-    const isFast = this.rotorSpeed > 28;
-    const blurDisc = this.mainRotor.getObjectByName("rotorBlur");
-    const tailBlurDisc = this.tailRotor.getObjectByName("tailBlur");
-    
-    if (blurDisc) blurDisc.visible = isFast;
-    if (tailBlurDisc) tailBlurDisc.visible = isFast;
+    // While blades are still visible, cap their visual rotation so individual
+    // blades never step more than the Nyquist limit between frames.
+    const cappedSpeed = THREE.MathUtils.lerp(Math.min(this.rotorSpeed, 18), this.rotorSpeed, smoothBlend);
+    this.rotorAngle -= cappedSpeed * delta;
+    this.tailRotorAngle -= cappedSpeed * 1.35 * delta;
+    this.mainRotor.rotation.y = this.rotorAngle;
+    this.tailRotor.rotation.x = this.tailRotorAngle;
 
-    // Do not hide blades, let them spin inside the blur disc for a better visual effect
-    this.mainRotor.children.forEach(c => {
-      if (c.name !== "rotorBlur" && c.type === "Group") c.visible = true;
-    });
-    this.tailRotor.children.forEach(c => {
-      if (c.name !== "tailBlur" && c.type === "Group") c.visible = true;
-    });
+    // Fade blades out and the blur disc in as RPM climbs.
+    const bladeOpacity = 1 - smoothBlend * 0.82;
+    this.mainBladeMat.opacity = bladeOpacity;
+    this.tailBladeMat.opacity = bladeOpacity;
+    this.mainBlurMat.opacity = smoothBlend * 0.34;
+    this.tailBlurMat.opacity = smoothBlend * 0.34;
   }
 }
 
@@ -2541,7 +2749,8 @@ class PowerUp {
     }
   }
 
-  destroy(scene: THREE.Scene) {
+
+  destroy(scene: THREE.Scene) {
     this.active = false;
     scene.remove(this.mesh);
   }
@@ -2664,10 +2873,21 @@ export class GameEngine {
   audio: AudioManager;
   lastTime: number = 0;
 
+  // Biome atmosphere
+  ambientLight!: THREE.HemisphereLight;
+  currentBiome: BiomeName | null = null;
+  private ambientSkyColor = new THREE.Color(0xe9fbff);
+  private ambientGroundColor = new THREE.Color(0x4a5576);
+
   settings = {
     invertedY: false,
     gamepadSensitivity: 1.5,
+    masterVolume: 0.5,
+    muted: false,
+    highQuality: false,
   };
+
+  bloomPass: UnrealBloomPass;
 
   gamepadIndex: number | null = null;
   isMouseActive: boolean = true;
@@ -2828,7 +3048,7 @@ export class GameEngine {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(SKY_CLEAR_COLOR);
-    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, 0.0058);
+    this.scene.fog = new THREE.FogExp2(FOG_CLEAR_COLOR, 0.0026);
     this.scene.add(createSkyDome());
 
     this.camera = new THREE.PerspectiveCamera(
@@ -2850,6 +3070,7 @@ export class GameEngine {
     bloomPass.threshold = 0.82;
     bloomPass.strength = 0.72;
     bloomPass.radius = 0.42;
+    this.bloomPass = bloomPass;
     if (this.usePostProcessing) this.composer.addPass(bloomPass);
 
     const outputPass = new OutputPass();
@@ -2859,10 +3080,11 @@ export class GameEngine {
     this.world.gravity.set(0, -9.82, 0);
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
 
-    const ambient = new THREE.HemisphereLight(0xe9fbff, 0x4a5576, 2.05);
+    const ambient = new THREE.HemisphereLight(0xffffff, 0xa9b6bf, 1.55);
     this.scene.add(ambient);
+    this.ambientLight = ambient;
 
-    const softKey = new THREE.DirectionalLight(0xfff0cb, 1.18);
+    const softKey = new THREE.DirectionalLight(0xfff6e8, 1.85);
     softKey.position.set(-48, 86, 54);
     softKey.castShadow = true;
     softKey.shadow.camera.left = -180;
@@ -2876,7 +3098,7 @@ export class GameEngine {
     softKey.shadow.bias = -0.00018;
     this.scene.add(softKey);
 
-    const rimLight = new THREE.DirectionalLight(0x8bd8ff, 0.62);
+    const rimLight = new THREE.DirectionalLight(0xeaf4ff, 0.35);
     rimLight.position.set(65, 50, -85);
     this.scene.add(rimLight);
 
@@ -2991,6 +3213,8 @@ export class GameEngine {
     this.isPlaying = true;
     try {
       this.audio.resume();
+      this.audio.setMasterVolume(this.settings.masterVolume);
+      this.audio.setMuted(this.settings.muted);
       this.audio.startMusic();
     } catch {
       // Some browsers delay audio startup until the first canvas press.
@@ -3064,6 +3288,14 @@ export class GameEngine {
     this.waveMessage = "GET READY";
     this.weather.stormIntensity = 0;
     this.weather.targetIntensity = 0;
+    // Snap atmosphere to the starting biome so the first frame isn't a fade-in.
+    this.currentBiome = this.city.getBiomeAt(this.helicopter.body.position.z);
+    const startAtmosphere = BIOME_ATMOSPHERE[this.currentBiome];
+    this.weather.resetBiomeAtmosphere(startAtmosphere);
+    this.ambientSkyColor.setHex(startAtmosphere.ambientSky);
+    this.ambientGroundColor.setHex(startAtmosphere.ambientGround);
+    this.ambientLight.color.copy(this.ambientSkyColor);
+    this.ambientLight.groundColor.copy(this.ambientGroundColor);
     this.rain.mesh.visible = false;
     this.gameOverDispatched = false;
     this.isPlaying = false;
@@ -3151,20 +3383,39 @@ export class GameEngine {
     const origin = this.helicopter.body.position;
     const forward = this.getFallbackFireDirection();
 
+    // When the mouse is active, prefer the enemy closest to the cursor within a
+    // generous magnetism radius — this makes the reticle feel "sticky" on targets.
+    const magnetRadius = 34;
+
     for (const enemy of this.enemies) {
       if (!enemy.active) continue;
       const dx = enemy.body.position.x - origin.x;
       const dz = enemy.body.position.z - origin.z;
-      const dy = Math.abs(enemy.body.position.y - origin.y);
       const distSq = dx * dx + dz * dz;
       if (distSq < 12 || distSq > maxDistance * maxDistance) continue;
 
       const dist = Math.sqrt(distSq);
       const aheadBias = (dx / dist) * forward.x + (dz / dist) * forward.z;
-      if (useMouseCone && aheadBias < 0.28) continue;
       const lateralDistance = Math.abs(dx * forward.z - dz * forward.x);
-      if (useMouseCone && lateralDistance > 46 + dist * 0.12) continue;
-      const lanePenalty = useMouseCone ? lateralDistance * 14 : Math.abs(dx) * 1.9;
+
+      const cursorDistance = this.mouseAimValid
+        ? Math.hypot(
+            enemy.body.position.x - this.mouseAimPoint.x,
+            enemy.body.position.z - this.mouseAimPoint.z,
+          )
+        : Infinity;
+
+      // Hard magnetism: an enemy right under the cursor always wins.
+      const underCursor = useMouseCone && cursorDistance < magnetRadius;
+
+      if (useMouseCone && !underCursor) {
+        // Outside the magnet radius, fall back to a forward cone so we don't
+        // snap to enemies behind the player.
+        if (aheadBias < 0.2) continue;
+        if (lateralDistance > 52 + dist * 0.14) continue;
+      }
+
+      const lanePenalty = useMouseCone ? lateralDistance * 10 : Math.abs(dx) * 1.9;
       const behindPenalty = aheadBias < -0.25 ? 9000 : 0;
       const typeBonus =
         enemy.type === EnemyType.DRONE
@@ -3174,16 +3425,16 @@ export class GameEngine {
             : enemy.type === EnemyType.TANK
               ? 700
               : 0;
-      const cursorDistance =
-        this.mouseAimValid
-          ? Math.hypot(enemy.body.position.x - this.mouseAimPoint.x, enemy.body.position.z - this.mouseAimPoint.z)
-          : 0;
-      const score =
-        distSq * (useMouseCone ? 0.3 : 1) +
+
+      let score =
+        distSq * (useMouseCone ? 0.25 : 1) +
         lanePenalty +
-        cursorDistance * (useMouseCone ? 4.5 : 0) +
+        cursorDistance * (useMouseCone ? 6.0 : 0) +
         behindPenalty -
         typeBonus;
+
+      // Strongly bias toward whatever sits under the cursor.
+      if (underCursor) score -= 50000;
 
       if (score < bestScore) {
         bestScore = score;
@@ -3343,6 +3594,11 @@ export class GameEngine {
   };
 
   onKeyDown = (e: KeyboardEvent) => {
+    const rawKey = e.key.toLowerCase();
+    if (rawKey === "escape" || rawKey === "p") {
+      window.dispatchEvent(new CustomEvent("helistrike:pause-toggle"));
+      return;
+    }
     if (!this.isPlaying) return;
     const key = e.key.toLowerCase();
 
@@ -3552,10 +3808,39 @@ export class GameEngine {
   };
 
   onSettingsChanged = (e: Event) => {
-    const detail = (e as CustomEvent<{ invertedY?: boolean }>).detail;
-    if (detail?.invertedY !== undefined)
-      this.settings.invertedY = detail.invertedY;
+    const detail = (e as CustomEvent<{
+      invertedY?: boolean;
+      masterVolume?: number;
+      muted?: boolean;
+      highQuality?: boolean;
+    }>).detail;
+    if (!detail) return;
+    if (detail.invertedY !== undefined) this.settings.invertedY = detail.invertedY;
+    if (detail.masterVolume !== undefined) {
+      this.settings.masterVolume = detail.masterVolume;
+      this.audio.setMasterVolume(detail.masterVolume);
+    }
+    if (detail.muted !== undefined) {
+      this.settings.muted = detail.muted;
+      this.audio.setMuted(detail.muted);
+    }
+    if (detail.highQuality !== undefined) {
+      this.setHighQuality(detail.highQuality);
+    }
   };
+
+  /** Enables or disables the bloom post-processing pipeline at runtime. */
+  setHighQuality(enabled: boolean) {
+    if (this.settings.highQuality === enabled && this.usePostProcessing === enabled) return;
+    this.settings.highQuality = enabled;
+    this.usePostProcessing = enabled;
+
+    // Rebuild the composer pass chain in the correct order: render -> [bloom] -> output.
+    this.composer.passes.length = 0;
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    if (enabled) this.composer.addPass(this.bloomPass);
+    this.composer.addPass(new OutputPass());
+  }
 
   private findLockTarget(dirX: number, dirZ: number, maxDistance = 190) {
     let bestEnemy: Enemy | null = null;
@@ -3952,6 +4237,19 @@ export class GameEngine {
 
     const weapon = this.weapons.get(this.currentWeapon);
 
+    // --- Radar / minimap data (positions relative to the player) ---
+    const player = this.helicopter.body.position;
+    const playerHeading = this.helicopter.mesh.rotation.y;
+    const radarBlips = this.enemies
+      .filter((e) => e.active)
+      .map((e) => ({
+        x: e.body.position.x - player.x,
+        z: e.body.position.z - player.z,
+        type: e.type as number,
+      }));
+    const enemiesRemaining =
+      Math.max(0, this.totalEnemiesInWave - this.enemiesSpawnedInWave) + this.enemies.length;
+
     window.dispatchEvent(
       new CustomEvent("helistrike:update", {
         detail: {
@@ -3963,6 +4261,16 @@ export class GameEngine {
           wave: this.currentWave,
           message: this.waveTransitionTimer > 0 ? this.waveMessage : null,
           playing: this.isPlaying,
+          radar: {
+            heading: playerHeading,
+            blips: radarBlips,
+            range: 240,
+          },
+          waveProgress: {
+            remaining: enemiesRemaining,
+            total: this.totalEnemiesInWave,
+            active: this.enemies.length,
+          },
           weapon: weapon ? {
             name: weapon.name,
             ammo: weapon.ammo,
@@ -4035,6 +4343,7 @@ export class GameEngine {
           score: this.score,
           wave: this.currentWave,
           time,
+          maxCombo: this.maxCombo,
         },
       }),
     );
@@ -4043,7 +4352,8 @@ export class GameEngine {
 
   startNextWave() {
     this.currentWave++;
-    this.totalEnemiesInWave = 8 + Math.floor(this.currentWave * 6.5);
+    // Larger waves: more total enemies and a faster ramp for denser combat.
+    this.totalEnemiesInWave = 14 + Math.floor(this.currentWave * 9);
     this.enemiesSpawnedInWave = 0;
     this.spawnTimer = 1.2;
 
@@ -4056,7 +4366,7 @@ export class GameEngine {
       this.waveMessage = "WAVE 5\nHEAVY ARMOR DETECTED";
     } else if (this.currentWave % 4 === 0) {
       this.waveMessage = `WAVE ${this.currentWave}\nSWARM TACTICS`;
-      this.totalEnemiesInWave += 10; // Extra enemies on swarm waves
+      this.totalEnemiesInWave += 16; // Extra enemies on swarm waves
     } else {
       this.waveMessage = `WAVE ${this.currentWave}`;
     }
@@ -4208,7 +4518,7 @@ export class GameEngine {
   updateAIDirector(time: number, delta: number) {
     this.survivalTime += delta;
     const pressureFromTime = Math.min(1, this.survivalTime / 180);
-    const pressureFromThreats = Math.min(1, this.enemies.length / 18);
+    const pressureFromThreats = Math.min(1, this.enemies.length / 26);
     const pressureFromHealth = 1 - this.health / this.maxHealth;
     this.combatIntensity = THREE.MathUtils.clamp(
       pressureFromTime * 0.55 + pressureFromThreats * 0.35 + pressureFromHealth * 0.25,
@@ -4240,19 +4550,20 @@ export class GameEngine {
     if (this.enemiesSpawnedInWave < this.totalEnemiesInWave) {
       this.spawnTimer -= delta;
       // Cap active enemies to avoid overwhelming the player (increased for arcade swarm feel)
-      const maxActiveEnemies = 20 + Math.floor(this.currentWave * 3.0);
+      const maxActiveEnemies = 28 + Math.floor(this.currentWave * 4.0);
       if (this.spawnTimer <= 0 && this.enemies.length < maxActiveEnemies) {
-        // Spawn 1 to 2 enemies at once to increase intensity
+        // Spawn a small burst at once to increase intensity; bursts grow with wave.
+        const burstCap = 2 + Math.floor(this.currentWave * 0.5);
         const count = Math.min(
           maxActiveEnemies - this.enemies.length,
           this.totalEnemiesInWave - this.enemiesSpawnedInWave,
-          Math.random() < 0.4 + this.currentWave * 0.05 ? 2 : 1
+          1 + Math.floor(Math.random() * burstCap),
         );
         for (let i = 0; i < count; i++) {
           this.spawnEnemy();
         }
         // Spawning gets significantly faster in later waves
-        this.spawnTimer = Math.max(0.2, 0.7 - this.currentWave * 0.06);
+        this.spawnTimer = Math.max(0.15, 0.6 - this.currentWave * 0.06);
       }
     } else if (this.enemies.length === 0) {
       // Wave cleared! Go to next wave
@@ -4658,6 +4969,10 @@ export class GameEngine {
       (this.outerRing.material as THREE.MeshBasicMaterial).color.setHex(0xff3344);
       const scale = 1.0 + Math.sin(time * 15) * 0.15;
       this.targetGroup.scale.set(scale, scale, scale);
+    } else if (this.autoAimTarget && this.autoAimTarget.active) {
+      // Locked onto an enemy: warm red reticle with a subtle pulse for feedback.
+      (this.innerRing.material as THREE.MeshBasicMaterial).color.setHex(0xff5a4a);
+      (this.outerRing.material as THREE.MeshBasicMaterial).color.setHex(0xff5a4a);
     } else {
       (this.innerRing.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
       (this.outerRing.material as THREE.MeshBasicMaterial).color.setHex(0xffffff);
@@ -4698,6 +5013,7 @@ export class GameEngine {
     this.helicopter.setAim(this.aimPoint.x, this.aimPoint.z);
 
     // --- Weather & Environment ---
+    this.updateBiomeAtmosphere(delta);
     this.weather.update(time, delta, this.scene);
     this.rain.update(time, this.helicopter.mesh.position);
     (this.rain.mesh.material as THREE.ShaderMaterial).uniforms.uTime.value =
@@ -5005,12 +5321,39 @@ export class GameEngine {
     this.renderFrame();
   };
 
+  /**
+   * Detects the biome under the player and feeds its atmosphere into the
+   * weather system, while smoothly tinting the ambient hemisphere light.
+   */
+  updateBiomeAtmosphere(delta: number) {
+    const biome = this.city.getBiomeAt(this.helicopter.body.position.z);
+    const atmosphere = BIOME_ATMOSPHERE[biome];
+
+    if (biome !== this.currentBiome) {
+      this.currentBiome = biome;
+      this.weather.setBiomeAtmosphere(atmosphere);
+    }
+
+    // Frame-rate-independent blend toward the biome's ambient light tint.
+    const blend = 1 - Math.exp(-delta * 0.6);
+    this.ambientSkyColor.lerp(tempBiomeSky.setHex(atmosphere.ambientSky), blend);
+    this.ambientGroundColor.lerp(tempBiomeGround.setHex(atmosphere.ambientGround), blend);
+    this.ambientLight.color.copy(this.ambientSkyColor);
+    this.ambientLight.groundColor.copy(this.ambientGroundColor);
+  }
+
   updateCamera() {
     const speed = Math.sqrt(
       this.helicopter.body.velocity.x ** 2 + this.helicopter.body.velocity.z ** 2,
     );
+    // Forward travel is along -Z. Use it to pull the camera back/up so the
+    // player can see what's coming when flying forward.
+    const forwardSpeed = Math.max(0, -this.helicopter.body.velocity.z);
+    const forwardLook = Math.min(forwardSpeed * 0.55, 22);
+
     let camTargetX = this.helicopter.body.position.x;
-    let camTargetZ = this.helicopter.body.position.z + 52 + this.combatIntensity * 8;
+    let camTargetZ =
+      this.helicopter.body.position.z + 56 + this.combatIntensity * 8 + forwardLook;
 
     camTargetX += this.helicopter.body.velocity.x * 0.7;
     camTargetZ += this.helicopter.body.velocity.z * 0.65;
@@ -5019,10 +5362,14 @@ export class GameEngine {
     this.camera.position.x += (camTargetX - this.camera.position.x) * camLerp;
     this.camera.position.z += (camTargetZ - this.camera.position.z) * camLerp;
 
-    const camTargetY = 62 + Math.min(speed * 0.1, 9) + this.combatIntensity * 5;
+    // Raised base height plus extra lift while moving forward for a clearer view ahead.
+    const camTargetY =
+      70 + Math.min(speed * 0.1, 9) + this.combatIntensity * 5 + Math.min(forwardSpeed * 0.18, 7);
     this.camera.position.y += (camTargetY - this.camera.position.y) * 0.05;
 
-    const targetFov = 52 + Math.min(speed * 0.08, 7) + this.combatIntensity * 5;
+    // Widen FOV a touch when pushing forward to reveal more of the road ahead.
+    const targetFov =
+      54 + Math.min(speed * 0.08, 7) + this.combatIntensity * 5 + Math.min(forwardSpeed * 0.16, 6);
     this.camera.fov += (targetFov - this.camera.fov) * 0.045;
     this.camera.updateProjectionMatrix();
 
@@ -5035,10 +5382,11 @@ export class GameEngine {
       if (this.cameraShake < 0.01) this.cameraShake = 0;
     }
 
+    // Look further ahead (more negative Z) when moving forward.
     this.camera.lookAt(
       this.helicopter.body.position.x,
       17,
-      this.helicopter.body.position.z - 9,
+      this.helicopter.body.position.z - 9 - forwardLook * 0.5,
     );
   }
 }

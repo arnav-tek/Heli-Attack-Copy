@@ -42,3 +42,14 @@ A fast-paced, 3D low-poly arcade helicopter shooter built with React, Vite, Thre
 - **Space / Alt**: Special Abilities
 - **1, 2, 3, 4**: Switch weapons (Machine Gun, Missile, Rocket, Shotgun)
 - **R**: Reload
+- **Esc / P**: Pause (opens in-game settings)
+
+## Settings
+
+Open the **Settings** panel from the main menu, or pause mid-run with **Esc / P**, to adjust:
+
+- **Master Volume** and **Mute**
+- **Invert Aim Y**
+- **High Quality (Bloom)** post-processing
+
+All settings and your lifetime stats (runs played, best wave, best combo) are saved locally in your browser.

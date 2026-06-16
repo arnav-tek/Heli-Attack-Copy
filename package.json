@@ -1,17 +1,17 @@
 {
-  "name": "react-example",
+  "name": "heli-strike-3d",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
+  "description": "Heli-Strike Arcade Assault - a 3D low-poly arcade helicopter shooter built with React, Three.js, and Cannon-es.",
   "type": "module",
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "build": "vite build",
     "preview": "vite preview",
-    "clean": "rm -rf dist",
+    "clean": "rimraf dist",
     "lint": "tsc --noEmit"
   },
   "dependencies": {
-    "@tailwindcss/vite": "^4.1.14",
     "@types/three": "^0.184.0",
     "@vitejs/plugin-react": "^5.0.4",
     "cannon-es": "^0.20.0",
@@ -24,8 +24,12 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
-    "autoprefixer": "^10.4.21",
-    "tailwindcss": "^4.1.14",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "autoprefixer": "^10.5.0",
+    "postcss": "^8.5.15",
+    "rimraf": "^5.0.10",
+    "tailwindcss": "^3.4.19",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2"
   }

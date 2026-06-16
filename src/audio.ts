@@ -19,6 +19,10 @@ export class AudioManager {
   
   private lastExplosionTime = 0;
 
+  // Persisted mix state (applied whenever the context exists)
+  private masterVolume = 0.5;
+  private muted = false;
+
   constructor() {
     // Context is created lazily on first interaction
   }
@@ -27,10 +31,28 @@ export class AudioManager {
     if (this.ctx) return;
     this.ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
     this.masterGain = this.ctx.createGain();
-    this.masterGain.gain.value = 0.5;
+    this.masterGain.gain.value = this.muted ? 0 : this.masterVolume;
     this.masterGain.connect(this.ctx.destination);
     
     this.setupEngine();
+  }
+
+  /** Sets the master volume (0..1). Takes effect immediately and persists across context creation. */
+  public setMasterVolume(volume: number) {
+    this.masterVolume = Math.max(0, Math.min(1, volume));
+    this.applyMix();
+  }
+
+  /** Mutes or unmutes all audio without losing the configured volume level. */
+  public setMuted(muted: boolean) {
+    this.muted = muted;
+    this.applyMix();
+  }
+
+  private applyMix() {
+    if (!this.ctx || !this.masterGain) return;
+    const target = this.muted ? 0 : this.masterVolume;
+    this.masterGain.gain.setTargetAtTime(target, this.ctx.currentTime, 0.03);
   }
 
   public resume() {

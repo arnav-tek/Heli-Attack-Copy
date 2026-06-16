@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { GameEngine } from './game';
+import { applySettingsToEngine, loadSettings, saveSettings } from './settings';
+import type { GameSettings } from './settings';
+import { loadStats, recordRun } from './stats';
+import type { PlayerStats } from './stats';
+import { SettingsPanel } from './SettingsPanel';
+import { Minimap } from './Minimap';
+import type { RadarData } from './Minimap';
 
 type GameMode = 'menu' | 'playing' | 'gameover';
 
@@ -74,6 +81,15 @@ function KeyCap({ children }: { children: ReactNode }) {
   );
 }
 
+function GearIcon() {
+  return (
+    <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth="2.2">
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.6 4.6l2.1 2.1M17.3 17.3l2.1 2.1M19.4 4.6l-2.1 2.1M6.7 17.3l-2.1 2.1" />
+    </svg>
+  );
+}
+
 function Meter({ value, color }: { value: number; color: string }) {
   return (
     <div className="h-4 w-28 overflow-hidden rounded-[4px] border-2 border-black/45 bg-black/35 shadow-[0_2px_0_rgba(0,0,0,0.35)] sm:w-44">
@@ -110,6 +126,9 @@ function ThreeDMenu({
   highScore,
   wave,
   isNewBest,
+  stats,
+  settings,
+  onSettingsChange,
   onStart,
 }: {
   mode: GameMode;
@@ -117,9 +136,13 @@ function ThreeDMenu({
   highScore: number;
   wave: number;
   isNewBest: boolean;
+  stats: PlayerStats;
+  settings: GameSettings;
+  onSettingsChange: (next: Partial<GameSettings>) => void;
   onStart: () => void;
 }) {
   const isGameOver = mode === 'gameover';
+  const [showSettings, setShowSettings] = useState(false);
 
   return (
     <div
@@ -132,39 +155,114 @@ function ThreeDMenu({
               <span>{isGameOver ? 'Run Ended' : 'Heli-Strike'}</span>
             </div>
 
-            <div className="mt-5 grid grid-cols-3 gap-3 text-center">
-              <div className="menu-stat">
-                <span>Score</span>
-                <strong>{score.toLocaleString()}</strong>
+            {showSettings ? (
+              <div className="mt-5">
+                <SettingsPanel settings={settings} onChange={onSettingsChange} />
+                <div className="mt-5 flex justify-center">
+                  <MenuButton onClick={() => setShowSettings(false)}>Back</MenuButton>
+                </div>
               </div>
-              <div className="menu-stat">
-                <span>Best</span>
-                <strong>{highScore.toLocaleString()}</strong>
-              </div>
-              <div className="menu-stat">
-                <span>Stage</span>
-                <strong>{wave || '-'}</strong>
-              </div>
-            </div>
+            ) : (
+              <>
+                <div className="mt-5 grid grid-cols-3 gap-3 text-center">
+                  <div className="menu-stat">
+                    <span>Score</span>
+                    <strong>{score.toLocaleString()}</strong>
+                  </div>
+                  <div className="menu-stat">
+                    <span>Best</span>
+                    <strong>{highScore.toLocaleString()}</strong>
+                  </div>
+                  <div className="menu-stat">
+                    <span>Stage</span>
+                    <strong>{wave || '-'}</strong>
+                  </div>
+                </div>
 
-            {isNewBest && (
-              <div className="mt-3 rounded-[6px] border-2 border-[#ffe66d] bg-[#ffe66d]/25 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-white shadow-[0_3px_0_rgba(0,0,0,0.22)]">
-                New High Score
-              </div>
+                {isNewBest && (
+                  <div className="mt-3 rounded-[6px] border-2 border-[#ffe66d] bg-[#ffe66d]/25 px-4 py-2 text-center text-sm font-black uppercase tracking-[0.16em] text-white shadow-[0_3px_0_rgba(0,0,0,0.22)]">
+                    New High Score
+                  </div>
+                )}
+
+                <div className="mt-4 grid grid-cols-3 gap-2 text-center text-[10px] font-black uppercase tracking-[0.1em] text-white/80">
+                  <div className="rounded-[5px] border border-white/20 bg-black/20 px-2 py-1.5">
+                    <div className="opacity-70">Runs</div>
+                    <div className="mt-0.5 text-sm text-white">{stats.gamesPlayed}</div>
+                  </div>
+                  <div className="rounded-[5px] border border-white/20 bg-black/20 px-2 py-1.5">
+                    <div className="opacity-70">Best Wave</div>
+                    <div className="mt-0.5 text-sm text-white">{stats.bestWave || '-'}</div>
+                  </div>
+                  <div className="rounded-[5px] border border-white/20 bg-black/20 px-2 py-1.5">
+                    <div className="opacity-70">Best Combo</div>
+                    <div className="mt-0.5 text-sm text-white">{stats.bestCombo || '-'}</div>
+                  </div>
+                </div>
+
+                <div className="mt-5 flex justify-center gap-3">
+                  <MenuButton onClick={onStart}>{isGameOver ? 'Restart' : 'Start'}</MenuButton>
+                  <button
+                    type="button"
+                    onClick={() => setShowSettings(true)}
+                    className="pointer-events-auto flex h-12 items-center gap-2 rounded-[7px] border-2 border-white/75 bg-[#264fb1] px-5 text-sm font-black uppercase tracking-[0.14em] text-white shadow-[0_6px_0_#16265f] transition hover:-translate-y-0.5 hover:bg-[#315fd0] active:translate-y-1"
+                  >
+                    <GearIcon />
+                    Settings
+                  </button>
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3 text-sm font-black uppercase tracking-[0.12em] text-white/95">
+                  <div className="menu-chip">WASD Move</div>
+                  <div className="menu-chip">Mouse Aim</div>
+                  <div className="menu-chip">Space/Shift Alt</div>
+                  <div className="menu-chip">L-Click Fire</div>
+                  <div className="menu-chip col-span-2 text-center text-[#ff3344] bg-[#ff3344]/10 border-[#ff3344]/30 py-1.5 rounded-[5px] border">Q / R-Click Lock Salvo</div>
+                </div>
+              </>
             )}
-
-            <div className="mt-5 flex justify-center">
-              <MenuButton onClick={onStart}>{isGameOver ? 'Restart' : 'Start'}</MenuButton>
-            </div>
-
-            <div className="mt-4 grid grid-cols-2 gap-3 text-sm font-black uppercase tracking-[0.12em] text-white/95">
-              <div className="menu-chip">WASD Move</div>
-              <div className="menu-chip">Mouse Aim</div>
-              <div className="menu-chip">Space/Shift Alt</div>
-              <div className="menu-chip">L-Click Fire</div>
-              <div className="menu-chip col-span-2 text-center text-[#ff3344] bg-[#ff3344]/10 border-[#ff3344]/30 py-1.5 rounded-[5px] border">Q / R-Click Lock Salvo</div>
-            </div>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PauseMenu({
+  settings,
+  onSettingsChange,
+  onResume,
+  onQuit,
+}: {
+  settings: GameSettings;
+  onSettingsChange: (next: Partial<GameSettings>) => void;
+  onResume: () => void;
+  onQuit: () => void;
+}) {
+  return (
+    <div className="pointer-events-auto absolute inset-0 z-50 flex items-center justify-center bg-[#06112b]/70 px-4 backdrop-blur-sm">
+      <div className="w-full max-w-sm rounded-[8px] border-3 border-white/70 bg-gradient-to-b from-[#2c5cbf] to-[#16265f] p-6 shadow-[0_10px_0_#0b1738,0_24px_40px_rgba(0,0,0,0.4)]">
+        <h2 className="text-center text-3xl font-black uppercase tracking-[0.16em] text-white drop-shadow-[0_3px_0_rgba(0,0,0,0.45)]">
+          Paused
+        </h2>
+        <div className="mt-5">
+          <SettingsPanel settings={settings} onChange={onSettingsChange} />
+        </div>
+        <div className="mt-6 flex flex-col gap-3">
+          <button
+            type="button"
+            onClick={onResume}
+            className="h-12 rounded-[7px] border-2 border-white/75 bg-[#ff3344] text-lg font-black uppercase tracking-[0.16em] text-white shadow-[0_6px_0_#931521] transition hover:-translate-y-0.5 hover:bg-[#ff4b59] active:translate-y-1"
+          >
+            Resume
+          </button>
+          <button
+            type="button"
+            onClick={onQuit}
+            className="h-11 rounded-[7px] border-2 border-white/50 bg-black/25 text-sm font-black uppercase tracking-[0.14em] text-white/90 transition hover:bg-black/35"
+          >
+            Quit to Menu
+          </button>
         </div>
       </div>
     </div>
@@ -182,6 +280,11 @@ export default function App() {
   const [waveMessage, setWaveMessage] = useState<string | null>(null);
   const [highScore, setHighScore] = useState(0);
   const [isNewBest, setIsNewBest] = useState(false);
+  const [isPaused, setIsPaused] = useState(false);
+  const [settings, setSettings] = useState<GameSettings>(() => loadSettings());
+  const [stats, setStats] = useState<PlayerStats>(() => loadStats());
+  const settingsRef = useRef(settings);
+  const modeRef = useRef<GameMode>(mode);
   const [weaponInfo, setWeaponInfo] = useState<{
     name: string;
     ammo: number;
@@ -207,15 +310,48 @@ export default function App() {
     isPainting: boolean;
     ready: boolean;
   } | null>(null);
+  const [radar, setRadar] = useState<RadarData | null>(null);
+  const [waveProgress, setWaveProgress] = useState<{
+    remaining: number;
+    total: number;
+    active: number;
+  } | null>(null);
 
   useEffect(() => {
     setHighScore(readHighScore());
   }, []);
 
   useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  // Apply persisted settings to the engine once it exists and on change.
+  useEffect(() => {
+    applySettingsToEngine(settings);
+    saveSettings(settings);
+  }, [settings]);
+
+  useEffect(() => {
     if (!canvasRef.current) return;
     const engine = new GameEngine(canvasRef.current);
     engineRef.current = engine;
+
+    // Push persisted settings into the freshly created engine.
+    applySettingsToEngine(settingsRef.current);
+
+    const handlePauseToggle = () => {
+      // Only meaningful during an active run.
+      if (modeRef.current !== 'playing') return;
+      setIsPaused((prev) => {
+        const next = !prev;
+        engineRef.current?.setPaused(next);
+        return next;
+      });
+    };
 
     const handleUpdate = (e: CustomEvent) => {
       const nextScore = e.detail.score;
@@ -226,6 +362,8 @@ export default function App() {
       setComboInfo(e.detail.combo || null);
       setStatusInfo(e.detail.status || null);
       setSalvoInfo(e.detail.salvo || null);
+      setRadar(e.detail.radar || null);
+      setWaveProgress(e.detail.waveProgress || null);
 
       const storedHighScore = readHighScore();
       if (nextScore > storedHighScore) {
@@ -237,6 +375,7 @@ export default function App() {
     const handleGameOver = (e: CustomEvent) => {
       const finalScore = e.detail.score;
       setMode('gameover');
+      setIsPaused(false);
 
       const storedHighScore = readHighScore();
       setIsNewBest(finalScore >= storedHighScore && finalScore > 0);
@@ -244,6 +383,13 @@ export default function App() {
         window.localStorage.setItem('helistrike:highScore', String(finalScore));
         setHighScore(finalScore);
       }
+
+      const updated = recordRun({
+        score: finalScore,
+        wave: e.detail.wave ?? 0,
+        combo: e.detail.maxCombo ?? 0,
+      });
+      setStats(updated);
     };
 
     const handleStats = (e: CustomEvent) => {
@@ -254,11 +400,13 @@ export default function App() {
     window.addEventListener('helistrike:update', handleUpdate as EventListener);
     window.addEventListener('helistrike:stats', handleStats as EventListener);
     window.addEventListener('helistrike:gameover', handleGameOver as EventListener);
+    window.addEventListener('helistrike:pause-toggle', handlePauseToggle);
 
     return () => {
       window.removeEventListener('helistrike:update', handleUpdate as EventListener);
       window.removeEventListener('helistrike:stats', handleStats as EventListener);
       window.removeEventListener('helistrike:gameover', handleGameOver as EventListener);
+      window.removeEventListener('helistrike:pause-toggle', handlePauseToggle);
       engine.dispose();
       engineRef.current = null;
     };
@@ -268,13 +416,26 @@ export default function App() {
     if (mode === 'playing') return;
     setMode('playing');
     setIsNewBest(false);
+    setIsPaused(false);
     engineRef.current?.startGame();
   };
 
   const returnToMainMenu = () => {
     setMode('menu');
     setIsNewBest(false);
+    setIsPaused(false);
+    setRadar(null);
+    setWaveProgress(null);
     engineRef.current?.setPaused(true);
+  };
+
+  const handleSettingsChange = (next: Partial<GameSettings>) => {
+    setSettings((prev) => ({ ...prev, ...next }));
+  };
+
+  const resumeGame = () => {
+    setIsPaused(false);
+    engineRef.current?.setPaused(false);
   };
 
   const coins = Math.floor(score / 100);
@@ -331,6 +492,21 @@ export default function App() {
             style={textShadow}
           >
             Main Menu
+          </button>
+        )}
+
+        {mode === 'playing' && !isPaused && (
+          <button
+            type="button"
+            onClick={() => {
+              setIsPaused(true);
+              engineRef.current?.setPaused(true);
+            }}
+            className="pointer-events-auto absolute right-4 top-26 flex items-center gap-1.5 rounded-[6px] border-2 border-white/70 bg-[#264fb1]/80 px-3 py-2 text-xs font-black uppercase tracking-[0.14em] text-white shadow-[0_4px_0_#16265f,0_8px_18px_rgba(0,0,0,0.24)] transition hover:-translate-y-0.5 hover:bg-[#315fd0] active:translate-y-1 sm:right-6 sm:top-28"
+            style={textShadow}
+          >
+            <GearIcon />
+            Pause
           </button>
         )}
 
@@ -473,6 +649,21 @@ export default function App() {
             </div>
           </div>
         )}
+
+        {mode === 'playing' && (
+          <div className="absolute bottom-4 right-4 flex flex-col items-center gap-1.5 sm:right-6">
+            <Minimap radar={radar} />
+            {waveProgress && (
+              <div
+                className="rounded-[5px] border border-white/30 bg-[#102447]/70 px-2.5 py-1 text-center text-[11px] font-black uppercase tracking-[0.12em] text-white"
+                style={textShadow}
+              >
+                Enemies Left{' '}
+                <span className="text-[#ff5a5a]">{waveProgress.remaining}</span>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {mode === 'playing' && waveMessage && (
@@ -483,8 +674,27 @@ export default function App() {
         </div>
       )}
 
+      {mode === 'playing' && isPaused && (
+        <PauseMenu
+          settings={settings}
+          onSettingsChange={handleSettingsChange}
+          onResume={resumeGame}
+          onQuit={returnToMainMenu}
+        />
+      )}
+
       {mode !== 'playing' && (
-        <ThreeDMenu mode={mode} score={score} highScore={highScore} wave={wave} isNewBest={isNewBest} onStart={startRun} />
+        <ThreeDMenu
+          mode={mode}
+          score={score}
+          highScore={highScore}
+          wave={wave}
+          isNewBest={isNewBest}
+          stats={stats}
+          settings={settings}
+          onSettingsChange={handleSettingsChange}
+          onStart={startRun}
+        />
       )}
     </div>
   );
